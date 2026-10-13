@@ -1,0 +1,36 @@
+#!/usr/bin/env node
+// Stand-in for the `claude` CLI for tests and UI demos (FLOORHANDS_CLAUDE_BIN=scripts/fake-claude.mjs).
+// Reads the prompt on stdin and prints stream-json lines like the real CLI does.
+import fs from 'node:fs';
+import path from 'node:path';
+
+const args = process.argv.slice(2);
+let prompt = '';
+process.stdin.setEncoding('utf8');
+for await (const chunk of process.stdin) prompt += chunk;
+
+const tools = [];
+const ti = args.indexOf('--tools');
+if (ti >= 0) for (let i = ti + 1; i < args.length && !args[i].startsWith('--'); i++) tools.push(args[i]);
+
+const out = o => process.stdout.write(JSON.stringify(o) + '\n');
+const use = (name, input) => out({ type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } });
+out({ type: 'system', subtype: 'init', tools });
+await new Promise(r => setTimeout(r, 150));
+
+let result;
+if (prompt.includes('Team roster')) {
+  const fence = '`'.repeat(3);
+  use('Read', { file_path: 'README.md' });
+  const plan = { summary: 'Add a demo note, then review it.', steps: [{ agent: 'fe', task: 'Create FLOORHANDS_DEMO.md with one line.' }, { agent: 'rfe', task: 'Review the change.' }] };
+  result = `${fence}json\n${JSON.stringify(plan)}\n${fence}`;
+} else if (tools.includes('Edit')) {
+  use('Write', { file_path: 'FLOORHANDS_DEMO.md' });
+  fs.writeFileSync(path.join(process.cwd(), 'FLOORHANDS_DEMO.md'), 'Hello from the team.\n');
+  result = 'Created FLOORHANDS_DEMO.md.';
+} else {
+  use('Read', { file_path: 'FLOORHANDS_DEMO.md' });
+  result = 'Reviewed: looks fine. No critical issues.';
+}
+out({ type: 'assistant', message: { content: [{ type: 'text', text: result }] } });
+out({ type: 'result', subtype: 'success', is_error: false, result, usage: { input_tokens: 1, output_tokens: 1 } });

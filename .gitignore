@@ -1,0 +1,4 @@
+node_modules/
+.floorhands/
+*.log
+.DS_Store

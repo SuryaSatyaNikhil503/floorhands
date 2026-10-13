@@ -1,0 +1,108 @@
+# floorhands License
+
+floorhands is **source-available** software. It is **not** open-source software as defined by the Open Source Initiative: commercial use and republishing are not permitted.
+
+Copyright (c) 2026 Surya Satya Nikhil Gadhavajula (https://github.com/SuryaSatyaNikhil503)
+
+floorhands is licensed to you under the **PolyForm Noncommercial License 1.0.0** (reproduced in full below) **together with the Additional Terms in this section**. The Additional Terms only narrow what you may do; they never grant more than the PolyForm text. Where the Additional Terms and the PolyForm text conflict, the Additional Terms control.
+
+Required Notice: Copyright (c) 2026 Surya Satya Nikhil Gadhavajula (https://github.com/SuryaSatyaNikhil503). floorhands, https://github.com/SuryaSatyaNikhil503/floorhands
+
+## Additional Terms
+
+**1. Build your own, locally. Do not publish it.**
+You may download, run, study and modify floorhands on your own computers, for your own noncommercial purposes, and build your own local version of it.
+You may **not** publish, distribute, sublicense, upload, host, package or otherwise make floorhands, or any modified, derived or substantially similar version of it, available to anyone else, publicly or privately, by any means. That includes public or private repositories, public forks, mirrors, package registries (such as npm), container images, archives, gists, and hosted or managed services. The PolyForm "Distribution License" is **not** granted to you. The PolyForm "Changes and New Works License" is granted to you **only** for changes and new works that you keep for your own local, noncommercial use and never share with anyone else.
+Two exceptions: (a) you may fork the official repository on GitHub **solely to prepare a contribution** to it, and may keep that fork only until the contribution is merged or withdrawn; (b) you may quote short excerpts of the documentation, with attribution, in discussion, reviews or teaching.
+
+**2. No commercial use.**
+Commercial use is not licensed. For clarity, each of these is commercial use: using floorhands inside the business operations of a for-profit organization; offering floorhands, or access to it, as a product or service (including a hosted service, a wrapper, or a feature of a paid product); and charging for anything whose value depends on floorhands.
+Your own personal, hobby, educational and research use is not commercial. **The code you create in your own projects with the help of floorhands is yours; this license covers floorhands itself, not your projects.**
+
+**3. Name.**
+"floorhands" is the licensor's name for this software. This license gives you no right to use that name, or confusingly similar names, for any other software or service.
+
+**4. Contributions.**
+If you submit a contribution (a pull request, a patch, or code in an issue), you confirm that you have the right to submit it, and you grant the licensor a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use, modify, sublicense and relicense it in any way, including commercially and under different license terms.
+
+**5. Safety and responsibility.**
+floorhands runs AI agents that read files, edit files and run commands on your computer. It is provided as is (see "No Liability" below). You alone are responsible for what you run it against, for reviewing every change before you approve it, and for any costs on your AI accounts. Read the "Known limits" in the README first.
+
+**6. Permission.**
+Anything these terms do not allow needs the licensor's written permission. To ask, open an issue titled "Permission request" at https://github.com/SuryaSatyaNikhil503/floorhands/issues.
+
+---
+
+# PolyForm Noncommercial License 1.0.0
+
+<https://polyformproject.org/licenses/noncommercial/1.0.0>
+
+## Acceptance
+
+In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
+
+## Copyright License
+
+The licensor grants you a copyright license for the software to do everything you might do with the software that would otherwise infringe the licensor's copyright in it for any permitted purpose.  However, you may only distribute the software according to [Distribution License](#distribution-license) and make changes or new works based on the software according to [Changes and New Works License](#changes-and-new-works-license).
+
+## Distribution License
+
+The licensor grants you an additional copyright license to distribute copies of the software.  Your license to distribute covers distributing the software with changes and new works permitted by [Changes and New Works License](#changes-and-new-works-license).
+
+## Notices
+
+You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software.  For example:
+
+> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
+
+## Changes and New Works License
+
+The licensor grants you an additional copyright license to make changes and new works based on the software for any permitted purpose.
+
+## Patent License
+
+The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software.
+
+## Noncommercial Purposes
+
+Any noncommercial purpose is a permitted purpose.
+
+## Personal Uses
+
+Personal use for research, experiment, and testing for the benefit of public knowledge, personal study, private entertainment, hobby projects, amateur pursuits, or religious observance, without any anticipated commercial application, is use for a permitted purpose.
+
+## Noncommercial Organizations
+
+Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution is use for a permitted purpose regardless of the source of funding or obligations resulting from the funding.
+
+## Fair Use
+
+You may have "fair use" rights for the software under the law. These terms do not limit them.
+
+## No Other Rights
+
+These terms do not allow you to sublicense or transfer any of your licenses to anyone else, or prevent the licensor from granting licenses to anyone else.  These terms do not imply any other licenses.
+
+## Patent Defense
+
+If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
+
+## Violations
+
+The first time you are notified in writing that you have violated any of these terms, or done anything with the software not covered by your licenses, your licenses can nonetheless continue if you come into full compliance with these terms, and take practical steps to correct past violations, within 32 days of receiving notice.  Otherwise, all your licenses end immediately.
+
+## No Liability
+
+***As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.***
+
+## Definitions
+
+The **licensor** is the individual or entity offering these terms, and the **software** is the software the licensor makes available under these terms.
+
+**You** refers to the individual or entity agreeing to these terms.
+
+**Your company** is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization.  **Control** means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise.  Control can be direct or indirect.
+
+**Your licenses** are all the licenses granted to you for the software under these terms.
+
+**Use** means anything you do with the software requiring one of your licenses.

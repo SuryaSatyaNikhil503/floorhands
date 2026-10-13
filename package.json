@@ -1,0 +1,34 @@
+{
+  "name": "floorhands",
+  "version": "0.1.0",
+  "description": "A local office of nine engineering agents, run through your own Claude Code CLI, that review, build and test in isolated git worktrees and hold every change for your approval.",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Surya Satya Nikhil Gadhavajula",
+  "homepage": "https://github.com/SuryaSatyaNikhil503/floorhands#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SuryaSatyaNikhil503/floorhands.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SuryaSatyaNikhil503/floorhands/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-code-plugin",
+    "ai-agents",
+    "code-review",
+    "git-worktree",
+    "developer-tools",
+    "local-first",
+    "source-available"
+  ],
+  "type": "module",
+  "bin": { "floorhands": "bin/floorhands" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "node bin/floorhands start"
+  }
+}

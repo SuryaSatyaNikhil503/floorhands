@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Permission request / licensing
+    url: https://github.com/SuryaSatyaNikhil503/floorhands/issues/new?title=Permission+request
+    about: Ask for permission to do something the license does not allow (for example commercial use). Opens an issue titled "Permission request".
+  - name: Report a security problem privately
+    url: https://github.com/SuryaSatyaNikhil503/floorhands/security/advisories/new
+    about: Do not open a public issue for a vulnerability. Use private vulnerability reporting (see SECURITY.md).

@@ -1,0 +1,14 @@
+{
+  "name": "floorhands",
+  "owner": {
+    "name": "floorhands"
+  },
+  "description": "floorhands: a local office of engineering agents for Claude Code.",
+  "plugins": [
+    {
+      "name": "floorhands",
+      "source": "./claude-plugin",
+      "description": "Start and use floorhands, a local office of engineering agents, from Claude Code."
+    }
+  ]
+}

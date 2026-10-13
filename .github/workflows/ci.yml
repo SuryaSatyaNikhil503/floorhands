@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: npm test (Node ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The tests create throwaway git repositories. They pass their own identity where they commit,
+      # but a fresh runner has no global git config, so set a neutral one to keep the environment predictable.
+      - name: Configure git for the test repositories
+        run: |
+          git config --global user.name "floorhands CI"
+          git config --global user.email "ci@floorhands.invalid"
+          git config --global init.defaultBranch main
+
+      # npm test uses scripts/fake-claude.mjs only: no network, no Claude login, no quota.
+      # The real-CLI probes (scripts/spike-claude.mjs, scripts/smoke.mjs) are never run in CI.
+      - name: Run the test suite
+        run: npm test

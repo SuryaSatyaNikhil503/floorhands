@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>floorhands</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>floorhands</h1>
+    <span id="project" class="muted"></span>
+    <span id="conn" class="conn" title="live connection"><span class="dot" aria-hidden="true">●</span><span id="conn-text" class="sr-only" aria-live="polite">Connecting</span></span>
+  </header>
+  <div id="boot" class="boot" aria-live="assertive"></div>
+  <main class="layout">
+    <section class="floor-wrap" aria-label="Office floor">
+      <svg id="floor" role="group"><title>Office floor plan</title></svg>
+    </section>
+    <aside class="side">
+      <form id="new-task" class="card">
+        <label for="task-text">Give the team a task</label>
+        <textarea id="task-text" rows="3" maxlength="4000" placeholder="e.g. Review the contact form for security and scalability"></textarea>
+        <button type="submit" id="send">Send to the team</button>
+        <p id="form-error" class="error" role="alert"></p>
+      </form>
+      <section class="card">
+        <h2>Tasks</h2>
+        <ul id="tasks" class="tasks"></ul>
+      </section>
+      <section id="detail" class="card" hidden></section>
+    </aside>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
