@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { detectStack, renderFacts, FACT_TAGS } from '../server/stack.js';
+import { detectStack, renderFacts, FACT_TAGS, _testing } from '../server/stack.js';
 
 const made = [];
 const tmp = (prefix = 'floorhands-stack-') => {
@@ -534,9 +534,15 @@ test('renderFacts only emits vocabulary tokens even if handed a tampered Facts o
   assert.ok(renderFacts(null).startsWith('PROJECT FACTS'));
 });
 
-test('renderFacts tells agents when there are no npm scripts', () => {
-  const out = renderFacts(detectStack(tmp()));
-  assert.match(out, /no package\.json scripts/i);
+test('renderFacts wording is true: no package.json vs package.json without the six scripts', () => {
+  const none = renderFacts(detectStack(tmp()));
+  assert.match(none, /no root package\.json/i);
+  assert.doesNotMatch(none, /no scripts named/i);
+  const root = tmp();
+  pkg(root, { name: 'x', scripts: { start: 'node .', 'lint:fix': 'x' } });
+  const out = renderFacts(detectStack(root));
+  assert.match(out, /no scripts named lint, build, format, typecheck, test or e2e/i);
+  assert.doesNotMatch(out, /no root package\.json/i);
 });
 
 test('a hostile .git/config cannot run code through git ls-files', () => {
@@ -552,4 +558,288 @@ test('a hostile .git/config cannot run code through git ls-files', () => {
   const f = detectStack(root);
   assert.equal(f.hasGit, true);
   assert.equal(fs.existsSync(marker), false);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Review round 1
+// ---------------------------------------------------------------------------------------------------------------------------------
+const exists = (p) => fs.existsSync(p);
+const setConfig = (root, text) => fs.appendFileSync(path.join(root, '.git', 'config'), text);
+
+// Reviewer fixture: a skip-worktree .gitignore whose blob is gone, in a repo that claims to be a partial clone. git lazily fetches the
+// blob while reading ignore rules, and that fetch runs core.sshCommand / remote.<n>.uploadpack from the untrusted .git/config.
+function promisorFixture(variant) {
+  const root = tmp();
+  const marker = path.join(tmp(), 'canary');
+  const script = put(tmp(), 'canary.sh', `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
+  fs.chmodSync(script, 0o755);
+  put(root, 'a.js', '');
+  put(root, 'd/.gitignore', '*.log\n');
+  git(root, 'init', '-q', '-b', 'main');
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', 'init');
+  git(root, 'update-index', '--skip-worktree', 'd/.gitignore');
+  fs.rmSync(path.join(root, 'd', '.gitignore'));
+  const sha = git(root, 'rev-parse', ':d/.gitignore').trim();
+  fs.rmSync(path.join(root, '.git', 'objects', sha.slice(0, 2), sha.slice(2)));
+  put(root, 'd/new.txt', 'x');
+  if (variant === 'ssh') {
+    setConfig(root, `[core]\n\trepositoryformatversion = 1\n\tsshCommand = ${script}\n[extensions]\n\tpartialClone = origin\n[remote "origin"]\n\tpromisor = true\n\turl = ssh://evil.invalid/x\n`);
+  } else {
+    setConfig(root, `[core]\n\trepositoryformatversion = 1\n[extensions]\n\tpartialClone = origin\n[remote "origin"]\n\tpromisor = true\n\turl = file:///tmp\n\tuploadpack = ${script}\n`);
+  }
+  return { root, marker };
+}
+for (const variant of ['ssh', 'uploadpack']) {
+  test(`CRITICAL: a promisor-style .git/config cannot make git run a program (${variant})`, () => {
+    const { root, marker } = promisorFixture(variant);
+    const f = detectStack(root);
+    assert.equal(exists(marker), false, 'canary was executed by the repository config');
+    assert.equal(f.hasGit, true);
+    assert.ok(f.languages.includes('javascript'));
+    assert.ok(f.tags.includes('no-npm-scripts'));
+  });
+}
+
+test('core.worktree pointing elsewhere does not redirect the listing', () => {
+  const outside = tmp('floorhands-outside-');
+  for (let i = 0; i < 6; i++) put(outside, `lib/f${i}.rb`, '');
+  put(outside, 'Gemfile', "gem 'rails'");
+  const root = tmp();
+  put(root, 'a.ts', ''); put(root, 'b.ts', '');
+  git(root, 'init', '-q', '-b', 'main');
+  setConfig(root, `[core]\n\tworktree = ${outside}\n`);
+  const f = detectStack(root);
+  assert.ok(!f.languages.includes('ruby'));
+  assert.ok(!f.frameworks.includes('rails'));
+  assert.deepEqual(f.languages, ['typescript']);
+  assert.equal(f.fileCount, 2);
+});
+
+test('core.worktree=/ finishes quickly and describes the repo only', () => {
+  const root = tmp();
+  put(root, 'a.py', '');
+  git(root, 'init', '-q', '-b', 'main');
+  setConfig(root, '[core]\n\tworktree = /\n');
+  const t0 = Date.now();
+  const f = detectStack(root);
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+  assert.deepEqual(f.languages, ['python']);
+  assert.equal(f.fileCount, 1);
+});
+
+test('a .git FILE (gitdir: elsewhere) is not used: bounded walk, other repo not described', () => {
+  const other = tmp('floorhands-otherrepo-');
+  for (let i = 0; i < 6; i++) put(other, `x${i}.rb`, '');
+  git(other, 'init', '-q', '-b', 'main');
+  git(other, 'add', '-A');
+  git(other, 'commit', '-q', '-m', 'i');
+  const root = tmp();
+  put(root, 'a.go', '');
+  fs.writeFileSync(path.join(root, '.git'), `gitdir: ${path.join(other, '.git')}\n`);
+  const f = detectStack(root);
+  assert.deepEqual(f.languages, ['go']);
+  assert.equal(f.fileCount, 2 - 1, 'only a.go; the .git file is skipped');
+});
+
+test('a .git SYMLINK is not used: bounded walk, other repo not described', () => {
+  const other = tmp('floorhands-otherrepo-');
+  for (let i = 0; i < 6; i++) put(other, `x${i}.rb`, '');
+  git(other, 'init', '-q', '-b', 'main');
+  git(other, 'add', '-A');
+  git(other, 'commit', '-q', '-m', 'i');
+  const root = tmp();
+  put(root, 'a.go', '');
+  fs.symlinkSync(path.join(other, '.git'), path.join(root, '.git'));
+  const f = detectStack(root);
+  assert.deepEqual(f.languages, ['go']);
+  assert.equal(f.fileCount, 1);
+});
+
+test('GIT_* variables in the environment cannot redirect or arm git', () => {
+  const other = tmp('floorhands-otherrepo-');
+  for (let i = 0; i < 6; i++) put(other, `x${i}.rb`, '');
+  git(other, 'init', '-q', '-b', 'main');
+  git(other, 'add', '-A');
+  git(other, 'commit', '-q', '-m', 'i');
+  const marker = path.join(tmp(), 'canary');
+  const script = put(tmp(), 'canary.sh', `#!/bin/sh\ntouch '${marker}'\n`);
+  fs.chmodSync(script, 0o755);
+  const root = tmp();
+  put(root, 'a.go', '');
+  git(root, 'init', '-q', '-b', 'main');
+  const keys = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1'];
+  const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+  try {
+    process.env.GIT_DIR = path.join(other, '.git');
+    process.env.GIT_WORK_TREE = other;
+    process.env.GIT_INDEX_FILE = path.join(other, '.git', 'index');
+    process.env.GIT_CONFIG_COUNT = '2';
+    process.env.GIT_CONFIG_KEY_0 = 'core.sshCommand'; process.env.GIT_CONFIG_VALUE_0 = script;
+    process.env.GIT_CONFIG_KEY_1 = 'core.fsmonitor'; process.env.GIT_CONFIG_VALUE_1 = script;
+    const f = detectStack(root);
+    assert.deepEqual(f.languages, ['go']);
+    assert.equal(f.fileCount, 1);
+    assert.equal(exists(marker), false);
+  } finally {
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+});
+
+test('a huge unignored node_modules does not push root markers past the cap', { timeout: 60000 }, () => {
+  const root = tmp();
+  git(root, 'init', '-q', '-b', 'main');
+  put(root, 'package.json', { scripts: { test: 'node --test' }, dependencies: { express: '4' } });
+  put(root, 'pnpm-lock.yaml', '');
+  const nm = path.join(root, 'node_modules');
+  for (let d = 0; d < 1200; d++) {
+    const dir = path.join(nm, `m${String(d).padStart(4, '0')}`);
+    fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(dir, `i${i}.js`), '');
+  }
+  const t0 = Date.now();
+  const f = detectStack(root);
+  assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0}ms`);
+  assert.equal(f.commands.test, true);
+  assert.ok(f.frameworks.includes('express'));
+  assert.equal(f.packageManager, 'pnpm');
+  assert.ok(f.fileCount < 10, `node_modules entries leaked into the count: ${f.fileCount}`);
+});
+
+test('root markers are found by direct lstat even when the listing misses them', () => {
+  // 100k+ tracked-looking source files in a directory that sorts before package.json, in a plain (walk) directory: the walk cap
+  // (5,000) is hit before package.json is listed, yet the root manifest must still be read.
+  const root = tmp();
+  for (let d = 0; d < 60; d++) {
+    const dir = path.join(root, `a${String(d).padStart(2, '0')}`);
+    fs.mkdirSync(dir);
+    for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(dir, `f${i}.js`), '');
+  }
+  put(root, 'package.json', { scripts: { lint: 'x' } });
+  put(root, 'yarn.lock', '');
+  const f = detectStack(root);
+  assert.equal(f.commands.lint, true);
+  assert.equal(f.packageManager, 'yarn');
+});
+
+test('a FIFO named package.json is ignored and never opened (walk and git)', { timeout: 15000 }, () => {
+  const a = tmp();
+  execFileSync('mkfifo', [path.join(a, 'package.json')]);
+  put(a, 'x.js', '');
+  const fa = detectStack(a);
+  assert.equal(fa.packageManager, 'none');
+
+  const b = tmp();
+  put(b, 'package.json', { dependencies: { react: '1' } });
+  put(b, 'x.js', '');
+  commitAll(b);
+  fs.rmSync(path.join(b, 'package.json'));
+  execFileSync('mkfifo', [path.join(b, 'package.json')]);
+  const fb = detectStack(b);
+  assert.equal(fb.hasGit, true);
+  assert.ok(!fb.frameworks.includes('react'));
+  assert.equal(fb.packageManager, 'none');
+
+  // direct readManifest on a FIFO: refused without blocking
+  assert.equal(_testing.readManifest(b, ['package.json']), null);
+});
+
+test('a symlink swapped in for the manifest between check and open is refused', () => {
+  const outside = tmp('floorhands-outside-');
+  const secret = put(outside, 'package.json', { dependencies: { react: '1' } });
+  const root = tmp();
+  const p = pkg(root, { dependencies: { vue: '3' } });
+  const text = _testing.readManifest(root, ['package.json'], { afterCheck: () => { fs.rmSync(p); fs.symlinkSync(secret, p); } });
+  assert.equal(text, null);
+  // an ancestor directory swapped for a symlink between check and open is refused too
+  const root2 = tmp();
+  pkg(root2, { dependencies: { vue: '3' } }, 'apps/web/package.json');
+  const real = path.join(root2, 'apps');
+  const text2 = _testing.readManifest(root2, ['apps', 'web', 'package.json'], {
+    afterCheck: () => { fs.renameSync(real, `${real}.moved`); fs.symlinkSync(outside, real); put(outside, 'web/package.json', { dependencies: { react: '1' } }); },
+  });
+  assert.equal(text2, null);
+});
+
+test('a UTF-8 BOM before the JSON is tolerated', () => {
+  const root = tmp();
+  fs.writeFileSync(path.join(root, 'package.json'), '﻿{"dependencies":{"react":"1"},"scripts":{"test":"x"}}');
+  const f = detectStack(root);
+  assert.ok(f.frameworks.includes('react'));
+  assert.equal(f.commands.test, true);
+});
+
+test('language hints come from regular files only: a symlink named pom.xml sets nothing', () => {
+  const outside = tmp('floorhands-outside-');
+  put(outside, 'pom.xml', '<project/>');
+  put(outside, 'go.mod', 'module x');
+  put(outside, 'Dockerfile', 'FROM scratch');
+  const root = tmp();
+  put(root, 'x.txt', '');
+  fs.symlinkSync(path.join(outside, 'pom.xml'), path.join(root, 'pom.xml'));
+  fs.symlinkSync(path.join(outside, 'go.mod'), path.join(root, 'go.mod'));
+  fs.symlinkSync(path.join(outside, 'Dockerfile'), path.join(root, 'Dockerfile'));
+  const check = (f) => { assert.deepEqual(f.languages, []); assert.deepEqual(f.infra, []); };
+  check(detectStack(root));
+  commitAll(root);
+  check(detectStack(root));
+});
+
+test('text matching uses token boundaries and ignores comments and URLs', () => {
+  const no = (files, msg) => {
+    const root = tmp();
+    for (const [rel, body] of Object.entries(files)) put(root, rel, body);
+    const f = detectStack(root);
+    assert.deepEqual([f.frameworks, f.testTools], [[], []], msg);
+  };
+  no({ 'pom.xml': '<project><dependency><artifactId>spring-bootleg</artifactId></dependency></project>' }, 'spring-bootleg');
+  no({ 'requirements.txt': 'flaskish==1\nmypytest\n' }, 'flaskish');
+  no({ 'requirements.txt': '# no pytest here\n  # flask is not used\n' }, 'comment');
+  no({ 'requirements.txt': 'requests @ https://github.com/pallets/flask/archive/main.zip\n' }, 'url');
+  no({ 'pyproject.toml': '[project]\nname = "x"\n# django\n' }, 'toml comment');
+  no({ 'pom.xml': '<project><!-- <artifactId>junit</artifactId> https://junit.org/ spring-boot --></project>' }, 'xml comment');
+  no({ 'pom.xml': '<project><!-- unterminated spring-boot' }, 'unterminated xml comment');
+  no({ 'build.gradle': '// implementation "org.springframework.boot:spring-boot-starter"\n/* junit:junit:4 */\n' }, 'gradle comment');
+  no({ 'build.gradle': 'implementation "com.example:spring-bootleg:1"\n' }, 'gradle bootleg');
+  no({ 'Gemfile': "# gem 'rails'\ngem 'sinatra'\n" }, 'gemfile comment');
+
+  const yes = (files) => {
+    const root = tmp();
+    for (const [rel, body] of Object.entries(files)) put(root, rel, body);
+    const f = detectStack(root);
+    return [...f.frameworks, ...f.testTools];
+  };
+  assert.deepEqual(yes({ 'pom.xml': '<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>' }), ['spring-boot']);
+  assert.ok(yes({ 'pom.xml': '<project><artifactId>junit</artifactId></project>' }).includes('junit'));
+  assert.ok(yes({ 'pom.xml': '<project><artifactId>\n  quarkus-resteasy\n</artifactId></project>' }).includes('quarkus'));
+  assert.ok(yes({ 'build.gradle': 'implementation "org.springframework.boot:spring-boot-starter-web:3"\ntestImplementation "org.junit.jupiter:junit-jupiter:5"\n' }).includes('spring-boot'));
+  assert.ok(yes({ 'build.gradle': 'testImplementation "org.junit.jupiter:junit-jupiter:5"\n' }).includes('junit'));
+  assert.ok(yes({ 'requirements.txt': 'fastapi[standard]>=0.1  # web\nPytest==8\n' }).includes('fastapi'));
+  assert.ok(yes({ 'requirements.txt': 'fastapi[standard]>=0.1  # web\nPytest==8\n' }).includes('pytest'));
+  assert.ok(yes({ 'pyproject.toml': 'dependencies = ["django>=5", "celery"]' }).includes('django'));
+  assert.ok(yes({ 'Gemfile': "gem 'rails', '~> 7'\n" }).includes('rails'));
+});
+
+test('pathological comment markers do not take quadratic time', () => {
+  const root = tmp();
+  put(root, 'pom.xml', '<!--'.repeat(60000));
+  put(root, 'requirements.txt', 'a'.repeat(250000));
+  put(root, 'build.gradle', '/*'.repeat(100000));
+  const t0 = Date.now();
+  detectStack(root);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+});
+
+test('every token in the detection tables is in VOCAB (a typo cannot silently drop a tag)', () => {
+  const { VOCAB, tables } = _testing;
+  assert.ok(tables.length > 5);
+  let n = 0;
+  for (const { name, entries } of tables) {
+    for (const { bucket, token } of entries) {
+      n++;
+      assert.ok(VOCAB[bucket], `${name}: unknown bucket ${bucket}`);
+      assert.ok(VOCAB[bucket].includes(token), `${name}: ${token} is not in VOCAB.${bucket}`);
+    }
+  }
+  assert.ok(n > 60);
 });
