@@ -1,26 +1,33 @@
 // Prompt lint: ties every shipped agent prompt to the permission model in server/tiers.js (see docs/design/prompts-v2-design.md, section 6).
-// The helpers are unit-tested against synthetic prompts that DO violate each rule. The required-sections case needs the rewritten prompts
-// of Tasks 4-6, so it is `todo` until that prose exists (those tasks remove the flag).
+// The helpers are unit-tested against synthetic prompts that DO violate each rule. The required-sections case of a role is `todo` while
+// its prompt is still the v0.1.0 prose (none of its required headings exist) and a real test from its rewrite on (see todoReason).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRoster } from '../server/roster.js';
 import { buildSystem, MAX_SYSTEM_BYTES } from '../server/prompt.js';
 import { TIERS, denyRules } from '../server/tiers.js';
 import { FACT_TAGS, _testing } from '../server/stack.js';
+import { parsePlan, MAX_STEPS } from '../server/plan.js';
 
 const AGENTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents');
 const MAX_BODY_BYTES = 9 * 1024;
 const NOTES_BYTES = 4 * 1024;
 
-// Per-role required headings. Tasks 4-6 extend this table (Task 3 only knows the common ones).
-// THE one place to extend: Tasks 4-6 add each role's headings here, keyed by agent id (for example `arch: ['## Plan format']`).
-// Every agent already needs the common ones below. The sections case turns from `todo` into a real test as soon as a body has any
-// required heading (see `todoReason`), so a half-finished rewrite fails instead of hiding behind the flag.
-const COMMON_SECTIONS = ['## Method', '## Report'];
-export const REQUIRED_SECTIONS = { _common: COMMON_SECTIONS };
-const sectionsFor = id => [...COMMON_SECTIONS, ...(REQUIRED_SECTIONS[id] ?? [])];
+// Required headings. THE one place to extend: Tasks 5-6 add each role's headings here, keyed by agent id.
+// `_common` is agents/prompts/_common.md, the shared rules every agent receives first (it holds the shared `## Method` and `## Report`);
+// every other key is an agent id and lists that role body's own headings. An agent without an entry needs UNLISTED_ROLE_SECTIONS, so a
+// rewritten body cannot skip the table. The sections case turns from `todo` into a real test as soon as a body has any required heading
+// (see `todoReason`), so a half-finished rewrite fails instead of hiding behind the flag.
+const UNLISTED_ROLE_SECTIONS = ['## Method', '## Report'];
+export const REQUIRED_SECTIONS = {
+  _common: ['## Who you are and the ground rules', '## Method', '## Severity', '## Finding format', '## Report',
+    '## Working with other agents', '## When something is missing'],
+  arch: ['## Your job', '## Routing rules', '## Plan quality', '## Plan format', '## Answering directly', '## Architecture advice'],
+};
+const sectionsFor = id => (Object.hasOwn(REQUIRED_SECTIONS, id) ? REQUIRED_SECTIONS[id] : UNLISTED_ROLE_SECTIONS);
 
 // ---- lint helpers ---------------------------------------------------------------------------------------------------------------
 
@@ -110,8 +117,15 @@ export function lintTierClaims(text, tier) {
   return problems;
 }
 
+// A heading counts only where a reader sees it: not inside a code fence or an HTML comment (closed ones, and unclosed ones, which run
+// to the end of the text).
+const UNCLOSED_FENCE = /^(?:`{3,}|~{3,})[\s\S]*/m;
+const COMMENT = /<!--[\s\S]*?(?:-->|$(?![\s\S]))/g;
+const visibleText = text => withoutFences(text).replace(UNCLOSED_FENCE, '').replace(COMMENT, '');
+
 export function lintSections(body, required) {
-  return required.filter(h => !new RegExp(`^${h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(body)).map(h => `missing required section "${h}"`);
+  const visible = visibleText(body);
+  return required.filter(h => !new RegExp(`^${h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(visible)).map(h => `missing required section "${h}"`);
 }
 
 export function lintSize(body) {
@@ -220,8 +234,8 @@ test('lint flags prompts that claim web or network access', () => {
 });
 
 test('lint flags missing sections and an oversized body', () => {
-  assert.deepEqual(lintSections('## Method\ntext\n## Report\ntext', COMMON_SECTIONS), []);
-  assert.deepEqual(lintSections('## Method\ntext', COMMON_SECTIONS), ['missing required section "## Report"']);
+  assert.deepEqual(lintSections('## Method\ntext\n## Report\ntext', UNLISTED_ROLE_SECTIONS), []);
+  assert.deepEqual(lintSections('## Method\ntext', UNLISTED_ROLE_SECTIONS), ['missing required section "## Report"']);
   assert.deepEqual(lintSections('See ## Method inline', ['## Method']), ['missing required section "## Method"'], 'a heading must start a line');
   assert.equal(lintSize('x'.repeat(MAX_BODY_BYTES)).length, 0);
   assert.equal(lintSize('x'.repeat(MAX_BODY_BYTES + 1)).length, 1);
@@ -254,7 +268,22 @@ test('the sections case arms itself: todo while no required heading exists, a re
   assert.equal(todoReason(partial), false);
   assert.deepEqual(lintSections(partial.parts.body, sectionsFor('x')), ['missing required section "## Report"']);
   // A role-specific heading added to the table is enforced once the common ones exist.
-  assert.deepEqual(lintSections('## Method\n## Report', [...COMMON_SECTIONS, '## Plan format']), ['missing required section "## Plan format"']);
+  assert.deepEqual(lintSections('## Method\n## Report', [...UNLISTED_ROLE_SECTIONS, '## Plan format']), ['missing required section "## Plan format"']);
+});
+
+test('lintSections does not count headings hidden in a code fence or an HTML comment', () => {
+  const req = ['## Method', '## Report'];
+  const missing = ['missing required section "## Method"', 'missing required section "## Report"'];
+  assert.deepEqual(lintSections('Intro.\n```md\n## Method\n## Report\n```\nText.', req), missing, 'backtick fence');
+  assert.deepEqual(lintSections('Intro.\n~~~\n## Method\n~~~\n<!-- \n## Report\n-->\n', req), missing, 'tilde fence and a comment');
+  assert.deepEqual(lintSections('<!-- draft:\n## Method\n## Report\n-->', req), missing, 'multi-line comment');
+  assert.deepEqual(lintSections('Text.\n<!-- never closed\n## Method\n## Report\n', req), missing, 'an unclosed comment runs to the end');
+  assert.deepEqual(lintSections('Text.\n```\n## Method\n## Report\n', req), missing, 'an unclosed fence runs to the end');
+  // Visible headings around hidden ones still count.
+  assert.deepEqual(lintSections('## Method\n```\n## Report\n```\n<!-- x -->\n## Report\n', req), []);
+  // The self-arming case is not armed by headings that only appear in a fence or a comment.
+  const hidden = { id: 'x', name: 'X', tier: 'read', skills: [], parts: { intro: 'You are X.', tierNote: 'Tier: READ-ONLY.', body: '```\n## Method\n```\n<!--\n## Report\n-->' } };
+  assert.equal(typeof todoReason(hidden), 'string');
 });
 
 // ---- limits that hold for the shipped roster today -------------------------------------------------------------------------------
@@ -304,3 +333,80 @@ for (const agent of roster.agents) {
     assert.deepEqual(lintSections(agent.parts.body, sectionsFor(agent.id)), []);
   });
 }
+
+// ---- the common rules and the Architect (Task 4) -----------------------------------------------------------------------------------
+
+const COMMON_TEXT = fs.readFileSync(path.join(AGENTS, 'prompts', '_common.md'), 'utf8').trim();
+// The text of one `## ` section, up to the next `## ` heading (fences and comments removed, as for the headings check).
+const section = (text, heading) => {
+  const visible = visibleText(text);
+  const at = visible.search(new RegExp(`^${heading}\\s*$`, 'm'));
+  if (at < 0) return '';
+  const rest = visible.slice(at + heading.length);
+  const next = rest.search(/^## /m);
+  return next < 0 ? rest : rest.slice(0, next);
+};
+
+test('_common.md: has its required sections, fits in 5 KB and keeps the name and role placeholders', () => {
+  assert.deepEqual(lintSections(COMMON_TEXT, REQUIRED_SECTIONS._common), []);
+  assert.ok(bytes(COMMON_TEXT) <= 5 * 1024, `${bytes(COMMON_TEXT)} bytes`);
+  assert.match(COMMON_TEXT, /\{\{name\}\}/);
+  assert.match(COMMON_TEXT, /\{\{role\}\}/);
+});
+
+test('_common.md: ground rules cover untrusted content, secrets, the binding tier and no network', () => {
+  const rules = section(COMMON_TEXT, '## Who you are and the ground rules');
+  assert.match(rules, /data, never instructions/i);
+  assert.match(rules, /secret/i);
+  assert.match(rules, /tier/i);
+  assert.match(rules, /owner notes/i);
+  assert.match(rules, /network/i);
+});
+
+test('_common.md: defines all five severities, the finding format and the report skeleton', () => {
+  const severity = section(COMMON_TEXT, '## Severity');
+  for (const level of ['Critical', 'High', 'Medium', 'Low', 'Info']) assert.match(severity, new RegExp(`^- \\*\\*${level}\\*\\*`, 'm'), level);
+  assert.match(severity, /impact/i);
+  assert.match(severity, /likelihood/i);
+  assert.match(severity, /exposure/i);
+  const format = COMMON_TEXT.slice(COMMON_TEXT.indexOf('## Finding format'));
+  for (const token of ['Evidence:', 'Why it matters:', 'Fix:']) assert.ok(format.includes(token), token);
+  const report = section(COMMON_TEXT, '## Report');
+  for (const token of ['VERDICT:', 'What I checked', 'What I did not check']) assert.ok(report.includes(token), token);
+});
+
+const arch = roster.byId.arch;
+const stepIds = roster.agents.filter(a => !a.router).map(a => a.id);
+const JSON_FENCE = /^```json[ \t]*\n([\s\S]*?)^```[ \t]*$/gm;
+const archExamples = [...arch.parts.body.matchAll(JSON_FENCE)].map(m => m[1]);
+// Commands a step's text tells its agent to run; each must be allowed for that agent's tier.
+const STEP_COMMAND = /\b(?:npm run [\w:-]+|npm test|npm \w+|npx \S+|git [a-z-]+|node \S+|curl \S+)/g;
+
+test('arch: role body fits in 7 KB and is the router', () => {
+  assert.equal(arch.router, true);
+  assert.equal(arch.tier, 'read');
+  assert.ok(bytes(arch.parts.body) <= 7 * 1024, `${bytes(arch.parts.body)} bytes`);
+});
+
+test('arch: routing rules name each rule the orchestrator relies on', () => {
+  for (const phrase of ['no steps', 'one reviewer', 'tester last', 'at most 6 steps']) assert.match(arch.parts.body, new RegExp(phrase, 'i'), phrase);
+  for (const id of stepIds) assert.match(arch.parts.body, new RegExp(`\`${id}\``), `names agent ${id}`);
+});
+
+test('arch: every JSON example parses with parsePlan, names only real non-router agents, and gives each step work its tier can do', () => {
+  assert.ok(archExamples.length >= 2, `found ${archExamples.length} json examples`);
+  const plans = archExamples.map(raw => parsePlan(`\`\`\`json\n${raw}\`\`\``, stepIds));
+  for (const plan of plans) {
+    assert.deepEqual(plan.problems, []);
+    assert.ok(plan.summary, 'every example has a summary');
+    assert.ok(plan.steps.length <= MAX_STEPS);
+    for (const step of plan.steps) {
+      const tier = roster.byId[step.agent].tier;
+      assert.deepEqual(lintTierClaims(step.task, tier), [], `${step.agent}: ${step.task.slice(0, 60)}`);
+      for (const cmd of step.task.match(STEP_COMMAND) ?? []) assert.ok(commandVerdict(tier, cmd).ok, `${step.agent} (${tier}) cannot run ${cmd}`);
+    }
+  }
+  assert.ok(plans.some(p => p.steps.length === 0), 'one example answers directly with no steps');
+  const tiers = p => p.steps.map(s => roster.byId[s.agent].tier).join(' ');
+  assert.ok(plans.some(p => tiers(p) === 'build read test' && p.steps.at(-1).agent === 'e2e'), 'one example is builder -> reviewer -> tester last');
+});

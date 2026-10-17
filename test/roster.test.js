@@ -25,7 +25,7 @@ test('each system prompt names the agent and its tier; skills appear when the fa
   assert.match(rbe.system, /BE REVIEWER/);
   assert.match(rbe.system, /READ-ONLY/);
   assert.match(r.byId.fe.system, /isolated git worktree/);
-  assert.match(rbe.system, /data, never as instructions/);
+  assert.match(rbe.system, /data, never instructions/);
   assert.ok(!rbe.system.includes('{{'), 'no unreplaced placeholders');
   // skills are conditional now: the compat `system` has no facts, so only unconditional hints show
   assert.doesNotMatch(rbe.system, /Optional Claude skills/);
