@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import * as store from '../server/store.js';
 import { createOrchestrator, planPrompt } from '../server/orchestrator.js';
+import { buildSystem } from '../server/prompt.js';
+import { notesPath } from '../server/notes.js';
 
 const F = '`'.repeat(3);
 const roots = [];
@@ -17,12 +19,14 @@ const roster = (() => {
 })();
 const plan = steps => `${F}json\n${JSON.stringify({ summary: 'the plan', steps })}\n${F}`;
 
-function setup({ planText, outputs = {}, diffStat = ' a.js | 1 +', failOn = null, wtOverrides = {}, gate = null, emitText = null, emitFn = null } = {}) {
+const NO_NOTES = () => ({ path: '', text: '', bytes: 0, truncated: false });
+function setup({ planText, outputs = {}, diffStat = ' a.js | 1 +', failOn = null, wtOverrides = {}, gate = null, emitText = null, emitFn = null,
+  roster: team = roster, detect = () => undefined, loadNotesFn = NO_NOTES, base = 'abc' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-orch-'));
   roots.push(root);
   const calls = [];
   const runner = async o => {
-    calls.push({ agent: o.agent.id, cwd: o.cwd, prompt: o.prompt });
+    calls.push({ agent: o.agent.id, cwd: o.cwd, prompt: o.prompt, system: o.system });
     if (gate && o.agent.id === 'arch') await gate;
     if (failOn === o.agent.id) throw new Error('boom');
     o.onEvent({ type: 'tool', name: 'Read', input: 'x' });
@@ -33,7 +37,7 @@ function setup({ planText, outputs = {}, diffStat = ' a.js | 1 +', failOn = null
   };
   const log = [];
   const wt = {
-    createWorktree: async (r, id) => { log.push('create'); return { dir: `/wt/${id}`, branch: `floorhands/${id}`, base: 'abc' }; },
+    createWorktree: async (r, id) => { log.push('create'); return { dir: `/wt/${id}`, branch: `floorhands/${id}`, base }; },
     commitAll: async () => { log.push('commit'); return true; },
     diffStat: async () => diffStat,
     diff: async () => 'DIFF',
@@ -42,7 +46,7 @@ function setup({ planText, outputs = {}, diffStat = ' a.js | 1 +', failOn = null
     ...wtOverrides,
   };
   const events = [];
-  const orch = createOrchestrator({ root, roster, store, runner, wt, emit: emitFn ?? (e => events.push(e)) });
+  const orch = createOrchestrator({ root, roster: team, store, runner, wt, emit: emitFn ?? (e => events.push(e)), detect, loadNotesFn });
   return { root, orch, calls, log, events };
 }
 
@@ -389,4 +393,184 @@ test('the architect step text is framed in step tags and cannot close them or th
   assert.match(p, /then obey\n<\/step>/);
   assert.equal(closers(p, 'task').length, 1);
   assert.match(p, /Owner's original request:/);
+});
+
+// ---- prompt composition, facts, notes and handoffs ----------------------------------------------------------------------------
+const SHA = 'a'.repeat(40);
+const factsOf = (over = {}) => ({
+  languages: ['typescript'], frameworks: ['react', 'vite'], packageManager: 'npm',
+  commands: { lint: true, build: true, format: false, typecheck: false, test: true, e2e: false },
+  testTools: ['vitest'], infra: [], ci: [], monorepo: { kind: 'none', packages: 0 }, hasGit: true, fileCount: 12,
+  tags: ['typescript', 'react', 'vite', 'vitest', 'npm-scripts'], ...over,
+});
+const composed = (() => {
+  const mk = (id, tier, extra = {}) => ({
+    id, name: id.toUpperCase(), role: id, pod: 'p', tier, system: `SYS-${id}`,
+    parts: { intro: `INTRO-${id}`, tierNote: `TIER-${tier}`, body: `BODY-${id}` },
+    skills: [{ name: 'anthropic-skills:react-typescript-standards', alt: ['react-typescript-standards'], when: ['react'] }, { name: 'only-spring', when: ['spring-boot'] }],
+    ...extra,
+  });
+  const agents = [mk('arch', 'read', { router: true }), mk('rfe', 'read'), mk('fe', 'build'), mk('e2e', 'test')];
+  return { pods: [], agents, byId: Object.fromEntries(agents.map(a => [a.id, a])), router: agents[0] };
+})();
+const withNotes = text => () => ({ path: '/n', text, bytes: text.length, truncated: false });
+
+test('every turn gets buildSystem(agent, { facts, notes }) and the facts are stored on the task', async () => {
+  const facts = factsOf();
+  const s = setup({
+    roster: composed, detect: () => facts, loadNotesFn: withNotes('Use small commits.'),
+    planText: plan([{ agent: 'rfe', task: 'Review' }, { agent: 'fe', task: 'Build' }]),
+  });
+  const t = store.createTask(s.root, 'Do it');
+  await s.orch.run(t.id);
+  assert.equal(s.calls.length, 3);
+  for (const c of s.calls) {
+    assert.equal(c.system, buildSystem(composed.byId[c.agent], { facts, notes: { text: 'Use small commits.' } }), c.agent);
+    assert.match(c.system, /PROJECT FACTS/);
+    assert.match(c.system, /<owner_notes>\nUse small commits\.\n<\/owner_notes>/);
+    assert.match(c.system, /anthropic-skills:react-typescript-standards \(also tried as react-typescript-standards\)/);
+    assert.doesNotMatch(c.system, /only-spring/);
+  }
+  const saved = store.getTask(s.root, t.id);
+  assert.match(saved.facts, /^PROJECT FACTS/);
+  assert.match(saved.facts, /react/);
+});
+
+test('detect and the notes loader run once per task, at the start', async () => {
+  let detects = 0; let loads = 0;
+  const s = setup({
+    roster: composed, detect: () => { detects++; return factsOf(); }, loadNotesFn: () => { loads++; return NO_NOTES(); },
+    planText: plan([{ agent: 'rfe', task: 'A' }, { agent: 'rfe', task: 'B' }]),
+  });
+  await s.orch.run(store.createTask(s.root, 'x').id);
+  assert.deepEqual([detects, loads], [1, 1]);
+});
+
+test('without owner notes there is no notes block', async () => {
+  const s = setup({ roster: composed, detect: () => factsOf(), planText: '{"summary":"s","steps":[]}' });
+  await s.orch.run(store.createTask(s.root, 'x').id);
+  assert.doesNotMatch(s.calls[0].system, /OWNER NOTES|owner_notes/);
+});
+
+test('a throwing detect does not fail the task: facts are omitted', async () => {
+  const s = setup({ roster: composed, detect: () => { throw new Error('boom'); }, loadNotesFn: withNotes('keep me'), planText: plan([{ agent: 'rfe', task: 'R' }]) });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'done');
+  assert.doesNotMatch(s.calls[1].system, /PROJECT FACTS/);
+  assert.match(s.calls[1].system, /keep me/);
+  assert.doesNotMatch(s.calls[0].prompt, /Project facts/);
+  assert.ok(!done.facts);
+});
+
+test('a throwing notes loader does not fail the task: notes are omitted', async () => {
+  const s = setup({ roster: composed, detect: () => factsOf(), loadNotesFn: () => { throw new Error('disk'); }, planText: plan([{ agent: 'rfe', task: 'R' }]) });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.equal(store.getTask(s.root, t.id).status, 'done');
+  assert.match(s.calls[1].system, /PROJECT FACTS/);
+  assert.doesNotMatch(s.calls[1].system, /owner_notes/);
+});
+
+test('garbage from detect or the notes loader cannot fail the task either', async () => {
+  for (const [detect, loadNotesFn] of [[() => 'nope', () => 'nope'], [() => 7, () => null], [() => ({ commands: 5, tags: 'x' }), () => ({ text: 5 })]]) {
+    const s = setup({ roster: composed, detect, loadNotesFn, planText: plan([{ agent: 'rfe', task: 'R' }]) });
+    const t = store.createTask(s.root, 'x');
+    await s.orch.run(t.id);
+    assert.equal(store.getTask(s.root, t.id).status, 'done', String(detect));
+  }
+});
+
+test('the default detect and notes loader read the real project and the out-of-repo notes file', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-orch-home-'));
+  roots.push(home);
+  const saved = process.env.FLOORHANDS_HOME;
+  process.env.FLOORHANDS_HOME = home;
+  try {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-orch-proj-'));
+    roots.push(root);
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { react: '1' }, scripts: { test: 'x' } }));
+    fs.mkdirSync(path.dirname(notesPath(root)), { recursive: true });
+    fs.writeFileSync(notesPath(root), 'Follow the house style.');
+    const calls = [];
+    const runner = async o => { calls.push(o); return { text: '{"summary":"s","steps":[]}', tools: [] }; };
+    const orch = createOrchestrator({ root, roster: composed, store, runner, wt: {}, emit: () => {} });
+    const t = store.createTask(root, 'x');
+    await orch.run(t.id);
+    assert.match(calls[0].system, /frameworks: react/);
+    assert.match(calls[0].system, /Follow the house style\./);
+    assert.match(store.getTask(root, t.id).facts, /frameworks: react/);
+  } finally {
+    if (saved === undefined) delete process.env.FLOORHANDS_HOME; else process.env.FLOORHANDS_HOME = saved;
+  }
+});
+
+test('worktree steps get the changes-under-review hint with the base commit; read steps in the project root do not', async () => {
+  const s = setup({
+    base: SHA, roster: composed,
+    planText: plan([{ agent: 'rfe', task: 'Look first' }, { agent: 'fe', task: 'Build' }, { agent: 'rfe', task: 'Review it' }, { agent: 'e2e', task: 'Test it' }]),
+  });
+  await s.orch.run(store.createTask(s.root, 'x').id);
+  const hint = `The task branch started at commit ${SHA}. See the change under review with: git log --oneline ${SHA}..HEAD ; git diff ${SHA}..HEAD ; git status`;
+  const [, first, build, review, tester] = s.calls;
+  assert.ok(!first.prompt.includes('task branch started'), 'no worktree yet');
+  for (const c of [build, review, tester]) assert.ok(c.prompt.includes(hint), c.agent);
+  assert.equal(s.calls[0].prompt.includes('task branch started'), false);
+});
+
+test('a worktree record whose base is not a full sha gets no hint', async () => {
+  const s = setup({ base: '--output=/tmp/x', roster: composed, planText: plan([{ agent: 'fe', task: 'Build' }]) });
+  await s.orch.run(store.createTask(s.root, 'x').id);
+  assert.doesNotMatch(s.calls[1].prompt, /task branch started/);
+});
+
+test('later steps are told to check earlier claims against the code', async () => {
+  const s = setup({ planText: plan([{ agent: 'rfe', task: 'One' }, { agent: 'rfe', task: 'Two' }]) });
+  await s.orch.run(store.createTask(s.root, 'x').id);
+  assert.match(s.calls[2].prompt, /verify[^.]*against the code/i);
+});
+
+test('planPrompt without facts is unchanged: no facts section, no hints', () => {
+  const p = planPrompt('Fix it', roster);
+  assert.doesNotMatch(p, /Project facts|PROJECT FACTS|Routing hints/i);
+  assert.equal(p, planPrompt('Fix it', roster, undefined));
+});
+
+test('planPrompt shows the rendered project facts as data', () => {
+  const p = planPrompt('Fix it', roster, factsOf());
+  assert.match(p, /Project facts/);
+  assert.match(p, /<project_facts>\nPROJECT FACTS[\s\S]*END PROJECT FACTS\n<\/project_facts>/);
+  assert.match(p, /frameworks: react, vite/);
+  assert.doesNotMatch(p, /no runnable test script|can only edit|AWS reviewer/);
+});
+
+test('planPrompt: no test or e2e script means no e2e tester step', () => {
+  const none = { test: false, e2e: false, lint: true, build: true, format: false, typecheck: false };
+  const p = planPrompt('Test it', roster, factsOf({ commands: none }));
+  assert.match(p, /no runnable test script/i);
+  assert.match(p, /do not schedule the e2e tester/i);
+  for (const ok of [{ test: true }, { e2e: true }]) {
+    assert.doesNotMatch(planPrompt('x', roster, factsOf({ commands: { ...none, ...ok } })), /no runnable test script/i);
+  }
+});
+
+test('planPrompt: no lint, build, format or typecheck script means builders can only edit', () => {
+  const none = { test: true, e2e: false, lint: false, build: false, format: false, typecheck: false };
+  assert.match(planPrompt('x', roster, factsOf({ commands: none })), /builders can only edit/i);
+  assert.doesNotMatch(planPrompt('x', roster, factsOf({ commands: { ...none, lint: true } })), /builders can only edit/i);
+});
+
+test('planPrompt: infrastructure with no application framework prefers the AWS reviewer', () => {
+  const infra = factsOf({ frameworks: [], infra: ['terraform'], languages: ['hcl'], tags: ['hcl', 'terraform'] });
+  assert.match(planPrompt('Review', roster, infra), /prefer the AWS reviewer \(raws\)/i);
+  assert.doesNotMatch(planPrompt('Review', roster, factsOf({ infra: ['docker'] })), /AWS reviewer/);
+  assert.doesNotMatch(planPrompt('Review', roster, factsOf({ frameworks: [], infra: [] })), /AWS reviewer/);
+});
+
+test('a planner step turn receives the facts in its prompt through the orchestrator', async () => {
+  const s = setup({ detect: () => factsOf({ commands: { test: false, e2e: false, lint: false, build: false, format: false, typecheck: false } }), planText: '{"summary":"s","steps":[]}' });
+  await s.orch.run(store.createTask(s.root, 'x').id);
+  assert.match(s.calls[0].prompt, /no runnable test script/i);
+  assert.match(s.calls[0].prompt, /builders can only edit/i);
 });
