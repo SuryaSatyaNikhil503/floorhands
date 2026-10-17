@@ -23,10 +23,14 @@ export const REQUIRED_SECTIONS = {
   _common: ['## Who you are and the ground rules', '## Method', '## Severity', '## Finding format', '## Report',
     '## Working with other agents', '## When something is missing'],
   arch: ['## Your job', '## Routing rules', '## Plan quality', '## Plan format', '## Answering directly', '## Architecture advice'],
+  // Reviewers: the shared Method and Report (in `_common`) apply, so a reviewer body adds scoping, the checklist, recipes, stack notes and the verdict.
+  rfe: ['## Scope', '## Checklist', '## Search recipes', '## Stack notes', '## Verdict'],
+  rbe: ['## Scope', '## Checklist', '## Search recipes', '## Stack notes', '## Verdict'],
+  raws: ['## Scope', '## Checklist', '## Search recipes', '## Stack notes', '## Verdict'],
 };
 const sectionsFor = id => (Object.hasOwn(REQUIRED_SECTIONS, id) ? REQUIRED_SECTIONS[id] : []);
 // Roles whose prompts are still the v0.1.0 prose. This list may only shrink (asserted below): Tasks 5-6 empty it.
-export const NOT_YET_REWRITTEN = ['rfe', 'rbe', 'raws', 'fe', 'be', 'sre', 'sup', 'e2e'];
+export const NOT_YET_REWRITTEN = ['fe', 'be', 'sre', 'sup', 'e2e'];
 const PENDING_AT_TASK_4 = new Set(['rfe', 'rbe', 'raws', 'fe', 'be', 'sre', 'sup', 'e2e']);
 
 // ---- lint helpers ---------------------------------------------------------------------------------------------------------------
@@ -595,4 +599,69 @@ test('arch: deep questions, dependencies, test tooling, docs-only changes, repor
 
 test('_common.md: an injection attempt goes in summary for a role that replies with a plan', () => {
   assert.match(section(COMMON_TEXT, '## Who you are and the ground rules'), /report it as a finding, or, if your role replies with a plan, mention it in `summary`/);
+});
+
+// ---- reviewers (Task 5): rfe, rbe, raws ---------------------------------------------------------------------------------------------
+
+const ROLE_MAX_BYTES = 7 * 1024; // each role body (the global lint cap is 9 KB)
+const body = id => roster.byId[id].parts.body;
+const missingWords = (text, words) => words.filter(w => !text.toLowerCase().includes(w.toLowerCase()));
+// Lines inside code fences that start with a command-line program: a prompt must never put a command in a fenced block.
+const fencedCommandLines = text => [...text.matchAll(FENCE)].flatMap(m => m[0].split('\n').slice(1, -1).map(l => l.trim().replace(/^\$\s+/, ''))
+  .filter(l => COMMAND_WORDS.has(l.split(/\s+/)[0]) && l.split(/\s+/).length > 1));
+
+const REVIEWER_KEYWORDS = {
+  rfe: ['dangerouslySetInnerHTML', 'innerHTML', 'v-html', 'bypassSecurityTrust', 'document.write', 'eval(', 'new Function', 'javascript:', 'localStorage', 'sessionStorage',
+    'httpOnly', 'noopener', 'postMessage', 'event.origin', 'VITE_', 'NEXT_PUBLIC_', 'integrity', 'Content-Security-Policy', '@ts-ignore', 'effect', 'cleanup',
+    'alt', 'focus', 'contrast', 'aria', 'lazy', 'canonical', 'structured data', 'Tailwind', 'Next', 'Vue', 'Angular', 'Svelte'],
+  rbe: ['IDOR', 'SQL injection', 'SSRF', 'JWT', 'N+1', 'mass assignment', 'path traversal', 'XXE', 'CSRF', 'CORS', 'alg', 'Math.random', 'idempot', 'transaction',
+    'rate limit', 'pagination', 'index', 'Spring', '@PreAuthorize', 'actuator', 'FastAPI', 'Depends', 'pydantic', 'helmet', 'DEBUG', 'SECRET_KEY', 'Prisma', 'owner notes'],
+  raws: ['iam:PassRole', '0.0.0.0/0', 'pull_request_target', 'OIDC', 'wildcard', 'S3', 'publicly_accessible', 'KMS', 'CloudTrail', 'Secrets Manager', 'deletion_protection',
+    'lifecycle', 'latest', 'root', 'GITHUB_TOKEN', 'permissions:', 'SHA', 'github.event', 'NAT', 'Terraform', 'CDK', 'CloudFormation', 'Serverless', 'Kubernetes', 'Helm', 'Docker'],
+};
+
+for (const id of ['rfe', 'rbe', 'raws']) {
+  test(`${id}: has the reviewer sections, fits in 7 KB and is a read-tier agent`, () => {
+    assert.equal(roster.byId[id].tier, 'read');
+    assert.deepEqual(lintSections(body(id), REQUIRED_SECTIONS[id]), []);
+    assert.ok(bytes(body(id)) <= ROLE_MAX_BYTES, `${bytes(body(id))} bytes`);
+  });
+
+  test(`${id}: covers its checklist keywords, in the sections where they belong`, () => {
+    assert.deepEqual(missingWords(body(id), REVIEWER_KEYWORDS[id]), []);
+    assert.ok(section(body(id), '## Search recipes').length > 400, 'search recipes are concrete');
+    assert.ok(section(body(id), '## Stack notes').length > 300, 'stack notes are concrete');
+  });
+
+  test(`${id}: states the verdict values and the Critical -> block, High -> approve-with-changes rule`, () => {
+    const verdict = section(body(id), '## Verdict');
+    assert.match(verdict, /`VERDICT: approve \| approve-with-changes \| block`/);
+    assert.match(verdict, /any Critical[^.]*`block`/i);
+    assert.match(verdict, /any High[^.]*at least `approve-with-changes`/i);
+  });
+
+  test(`${id}: names the Read, Glob and Grep tools, scopes by the task branch, and prefers few evidenced findings`, () => {
+    const text = body(id);
+    for (const tool of ['Read', 'Glob', 'Grep']) assert.match(text, new RegExp(`\\b${tool}\\b`), tool);
+    assert.match(section(text, '## Scope'), /`The task branch started at commit <sha>`/);
+    assert.match(section(text, '## Scope'), /five well-evidenced findings/i);
+    assert.match(section(text, '## Scope'), /by risk/i);
+    assert.match(text, /quotes? the line/i);
+  });
+
+  test(`${id}: recommends no shell reader, no npx, no network and no fenced command`, () => {
+    const text = body(id);
+    assert.doesNotMatch(text, /\bnpx\b/);
+    assert.deepEqual(fencedCommandLines(text), []);
+    assert.deepEqual(inlineCommands(text).filter(c => !c.startsWith('git ')), [], 'only read-only git may appear as an inline command');
+  });
+}
+
+test('rbe and raws say regional or owner-specific rules come from the owner notes, naming none', () => {
+  assert.match(body('rbe'), /regional data-protection rules named in the owner notes/i);
+  assert.match(body('raws'), /owner notes/i);
+});
+
+test('reviewers do not claim to run an audit, a scan or a build', () => {
+  for (const id of ['rfe', 'rbe', 'raws']) assert.match(body(id), /cannot run|can't run|no audit|not run/i, id);
 });
