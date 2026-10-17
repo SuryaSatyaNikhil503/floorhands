@@ -46,7 +46,7 @@ Grep patterns are inline text. A hit is a lead to trace, never a finding by itse
 - Tokens: `localStorage`, `sessionStorage`, `Authorization`. A `setItem` that stores a token is Medium, High if any XSS sink exists.
 - URLs: `javascript:`, `window.location`, `location.href`, `returnTo`, `redirect`, `next=`. A query-string value that reaches them is an open redirect.
 - Windows: `postMessage`, `addEventListener('message'`, `target="_blank"`.
-- Secrets: `VITE_`, `NEXT_PUBLIC_`, `REACT_APP_`, `apiKey`, `secret`, `BEGIN PRIVATE`, `sk_live`. Read `.env.example`, never `.env*` (denied). A private key in client code is Critical.
+- Secrets: `VITE_`, `NEXT_PUBLIC_`, `REACT_APP_`, `apiKey`, `secret`, `BEGIN PRIVATE`, `sk_live`. `.env*`, even `.env.example`, is denied; do not read it. A private key in client code is Critical.
 - Third parties: `<script src=` in `index.html` and layout files; a cross-origin script without `integrity` is a hit.
 - Types and effects: `: any`, `as any`, `@ts-ignore`, `eslint-disable`; `useEffect(` (read the dependency array and any returned cleanup), `setInterval`, `addEventListener` with no matching remove.
 

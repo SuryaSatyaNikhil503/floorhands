@@ -48,7 +48,7 @@ Grep patterns are inline text. A hit is a lead to trace, never a finding by itse
 - Files and URLs: `path.join`, `sendFile`, `open(`, `fetch(`, `axios`, `requests.get`, `redirect(`.
 - Routes and auth: route declarations (`router.`, `app.get`, `@app.`, `@GetMapping`, `@RequestMapping`, `path(`), then the guards (`authenticate`, `requireAuth`, `Depends(`, `@PreAuthorize`, `login_required`); a route with none is a lead. `findById(` or `get(` fed by `req.params` or `req.body.userId` with no owner condition.
 - Binding: `req.body` passed whole, `Object.assign(`, `**request`, `@RequestBody` on an entity.
-- Secrets and crypto: `secret`, `password`, `apiKey`, `BEGIN PRIVATE`, `jwt.sign`, `jwt.verify`, `algorithms`, `verify=False`, `rejectUnauthorized`, `Math.random`, `md5`, `sha1`. Read `.env.example`, never `.env*` (denied).
+- Secrets and crypto: `secret`, `password`, `apiKey`, `BEGIN PRIVATE`, `jwt.sign`, `jwt.verify`, `algorithms`, `verify=False`, `rejectUnauthorized`, `Math.random`, `md5`, `sha1`. `.env*`, even `.env.example`, is denied; do not read it.
 - Errors and logs: `console.log`, `logger.`, `print(`, `printStackTrace`, `catch {`, `except:`, `err.stack`.
 - Scale: a query inside a `for` or `map`, `SELECT *` without `LIMIT`, list handlers with no `limit`, `CREATE INDEX` in migrations.
 
