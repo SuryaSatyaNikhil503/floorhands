@@ -136,7 +136,7 @@ export async function main(argv, { out = process.stdout, cwd = process.cwd() } =
     case 'notes': {
       const n = loadNotes(root);
       out.write(`notes file: ${n.path}\n`);
-      out.write(n.text ? `${n.text}${n.text.endsWith('\n') ? '' : '\n'}` : '(no notes yet — create the file above with your editor)\n');
+      out.write(n.text ? `${n.text}${n.text.endsWith('\n') ? '' : '\n'}` : '(no notes yet, create the file above with your editor)\n');
       return 0;
     }
     case 'help': case '--help': case '-h':

@@ -156,7 +156,7 @@ test('notes prints the path, then the contents or a hint, and creates nothing', 
     const m = /^notes file: (.+)\n/.exec(none);
     assert.ok(m, none);
     assert.ok(m[1].startsWith(path.join(home, 'projects') + path.sep) && m[1].endsWith('notes.md'), m[1]);
-    assert.match(none, /\(no notes yet — create the file above with your editor\)/);
+    assert.match(none, /\(no notes yet, create the file above with your editor\)/);
     assert.deepEqual(fs.readdirSync(home), [], 'creates nothing');
     assert.ok(!fs.existsSync(path.join(dir, '.floorhands')), 'nothing created in the project either');
     fs.mkdirSync(path.dirname(m[1]), { recursive: true });
