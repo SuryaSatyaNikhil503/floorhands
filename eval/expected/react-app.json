@@ -1,0 +1,11 @@
+[
+  {"id":"html-injection-xss","severity":"High","file":"src/components/ArticleView.tsx","linesHint":[20,22],"anyOf":["dangerouslySetInnerHTML","\\bXSS\\b","cross.?site scripting","sanitiz","DOMPurify"],"sample":"XSS through dangerouslySetInnerHTML of API-provided HTML"},
+  {"id":"token-in-localstorage","severity":"High","file":"src/api.ts","linesHint":[10,24],"anyOf":["localStorage","sessionStorage","httpOnly"],"sample":"Auth token stored in localStorage"},
+  {"id":"blank-without-rel","severity":"Low","file":"src/components/ArticleView.tsx","linesHint":[22,24],"alsoFiles":["src/App.tsx"],"anyOf":["noopener","noreferrer","target=.?_blank","tabnabbing"],"sample":"target=_blank links without rel=noopener noreferrer"},
+  {"id":"inputs-without-labels","severity":"Medium","file":"src/components/LoginForm.tsx","linesHint":[20,23],"anyOf":["\\blabels?\\b","aria-label","accessible name","placeholder"],"sample":"Login inputs have a placeholder but no label"},
+  {"id":"img-without-alt","severity":"Medium","file":"src/App.tsx","linesHint":[12,14],"anyOf":["\\balt\\b","alt text","alt attribute","alternative text"],"sample":"Logo image has no alt attribute"},
+  {"id":"effect-missing-dependency","severity":"Medium","file":"src/components/ArticleView.tsx","linesHint":[9,13],"anyOf":["dependenc","exhaustive-deps","stale","\\[\\]","id (change|prop)"],"sample":"useEffect is missing the id dependency so it shows stale articles"},
+  {"id":"interval-never-cleared","severity":"Medium","file":"src/components/ArticleView.tsx","linesHint":[9,13],"anyOf":["clearInterval","clean.?up","setInterval","leak","unmount"],"sample":"setInterval in useEffect is never cleared on unmount, a leak"},
+  {"id":"whole-lodash-import","severity":"Low","file":"src/format.ts","linesHint":[1,1],"anyOf":["lodash","tree.?shak","bundle size","whole (library|package)","named import"],"sample":"Whole lodash import bloats the bundle"},
+  {"id":"api-key-in-vite-env","severity":"High","file":"src/api.ts","linesHint":[1,3],"alsoFiles":[".env.example"],"anyOf":["VITE_","api.?key[\\s\\S]{0,160}(client|browser|bundle|expos|public|ship)","(client|browser|bundle|expos|public)[\\s\\S]{0,160}api.?key"],"sample":"API key in a VITE_ variable is shipped to the browser bundle"}
+]

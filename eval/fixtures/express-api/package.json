@@ -1,0 +1,18 @@
+{
+  "name": "shop-api",
+  "version": "1.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Orders and catalogue API for the shop storefront.",
+  "scripts": {
+    "start": "node src/server.js",
+    "lint": "node --check src/server.js && node --check src/auth.js && node --check src/routes/auth.js && node --check src/routes/orders.js && node --check src/routes/products.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5"
+  }
+}
