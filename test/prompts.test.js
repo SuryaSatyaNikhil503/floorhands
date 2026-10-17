@@ -27,10 +27,16 @@ export const REQUIRED_SECTIONS = {
   rfe: ['## Scope', '## Checklist', '## Search recipes', '## Stack notes', '## Verdict'],
   rbe: ['## Scope', '## Checklist', '## Search recipes', '## Stack notes', '## Verdict'],
   raws: ['## Scope', '## Checklist', '## Search recipes', '## Stack notes', '## Verdict'],
+  // Builders, support and the tester extend the common Method and Report with the sections below (`## Method` and `## Report` here are additions).
+  fe: ['## Scope', '## Workflow', '## Standards', '## Verification', '## Report'],
+  be: ['## Scope', '## Workflow', '## Standards', '## Verification', '## Report'],
+  sre: ['## Scope', '## Workflow', '## Standards', '## Verification', '## Report'],
+  sup: ['## Scope', '## Method', '## Ticket template', '## Report'],
+  e2e: ['## Scope', '## Strategy', '## Running tests', '## Report'],
 };
 const sectionsFor = id => (Object.hasOwn(REQUIRED_SECTIONS, id) ? REQUIRED_SECTIONS[id] : []);
 // Roles whose prompts are still the v0.1.0 prose. This list may only shrink (asserted below): Tasks 5-6 empty it.
-export const NOT_YET_REWRITTEN = ['fe', 'be', 'sre', 'sup', 'e2e'];
+export const NOT_YET_REWRITTEN = [];
 const PENDING_AT_TASK_4 = new Set(['rfe', 'rbe', 'raws', 'fe', 'be', 'sre', 'sup', 'e2e']);
 
 // ---- lint helpers ---------------------------------------------------------------------------------------------------------------
@@ -664,4 +670,106 @@ test('rbe and raws say regional or owner-specific rules come from the owner note
 
 test('reviewers do not claim to run an audit, a scan or a build', () => {
   for (const id of ['rfe', 'rbe', 'raws']) assert.match(body(id), /cannot run|can't run|no audit|not run/i, id);
+});
+
+// ---- builders, support and tester (Task 6): fe, be, sre, sup, e2e ---------------------------------------------------------------------
+
+const BUILD_SCRIPTS = ['npm run lint', 'npm run typecheck', 'npm run build', 'npm run format'];
+const BUILDER_STANDARDS = {
+  fe: ['accessib', 'dangerouslySetInnerHTML', 'innerHTML', 'loading', 'error', 'empty', 'responsive', 'any'],
+  be: ['validate', 'authorize', 'parameterised', 'secrets', 'idempotent', 'transaction', 'migration', 'status and error codes', 'happy path', 'main failure'],
+  sre: ['least privilege', 'pinned', 'SHA', 'secrets', 'health check', 'rollback', 'reversible', 'terraform'],
+};
+
+for (const id of ['fe', 'be', 'sre']) {
+  test(`${id}: builder sections, 7 KB, build tier, numbered workflow of nine steps`, () => {
+    assert.equal(roster.byId[id].tier, 'build');
+    assert.deepEqual(lintSections(body(id), REQUIRED_SECTIONS[id]), []);
+    assert.ok(bytes(body(id)) <= ROLE_MAX_BYTES, `${bytes(body(id))} bytes`);
+    const steps = [...section(body(id), '## Workflow').matchAll(/^(\d+)\. /gm)].map(m => Number(m[1]));
+    assert.deepEqual(steps, [1, 2, 3, 4, 5, 6, 7, 8, 9], 'workflow steps 1 to 9');
+  });
+
+  test(`${id}: stays inside the worktree, reviews its own git diff, names only the build scripts, and reports in the agreed format`, () => {
+    const text = body(id);
+    assert.match(text, /inside the worktree/);
+    assert.match(text, /`git diff`/);
+    assert.match(text, /`VERDICT: done \| partial \| blocked`/);
+    assert.match(text, /not run: /);
+    assert.match(text, /nothing runnable; changes are unverified/);
+    for (const cmd of BUILD_SCRIPTS) assert.ok(text.includes(`\`${cmd}\``), cmd);
+    for (const p of ['`.env*`', '`.git`', '`node_modules`', '`.claude`', '`.mcp.json`']) assert.ok(text.includes(p), p);
+    assert.match(text, /lockfiles?/);
+    assert.match(text, /narrowest reasonable reading/);
+    assert.match(text, /Never expand the scope/);
+    for (const field of ['Summary', 'Files changed', 'Behaviour change', 'Verification', 'Not done / follow-ups', 'Risks the reviewer should look at']) {
+      assert.ok(section(text, '## Report').includes(`\`${field}\``) || section(text, '## Report').includes(`${field}\``), field);
+    }
+    assert.doesNotMatch(text, /\bnpm test\b|\bnpm run (?:test|e2e)\b/, 'a build-tier agent cannot run the tests');
+    assert.doesNotMatch(text, /\bnpx\b/);
+    assert.deepEqual(fencedCommandLines(text), []);
+    assert.deepEqual(inlineCommands(text).filter(c => !c.startsWith('git ') && !BUILD_SCRIPTS.includes(c)), []);
+  });
+
+  test(`${id}: standards cover what the brief lists`, () => {
+    assert.deepEqual(missingWords(section(body(id), '## Standards') + section(body(id), '## Workflow'), BUILDER_STANDARDS[id]), []);
+  });
+
+  test(`${id}: treats a reviewer's findings as claims and does not commit`, () => {
+    assert.match(body(id), /treat each finding as a claim/);
+    assert.deepEqual(lintTierClaims(body(id), 'build'), []);
+  });
+}
+
+test('sre cannot apply, deploy or run cloud commands, and tells the owner exactly what to run and check', () => {
+  const text = body('sre');
+  assert.match(text, /cannot apply, deploy or plan/i);
+  assert.match(text, /cannot run cloud, Docker, Kubernetes or Terraform commands/i);
+  const runbook = section(text, '## Report');
+  assert.match(runbook, /`Owner runbook`/);
+  for (const w of ['exact commands', 'preview', 'apply', 'rollback', 'IAM']) assert.match(runbook, new RegExp(w, 'i'), w);
+  assert.deepEqual(inlineCommands(text).filter(c => !c.startsWith('git ') && !BUILD_SCRIPTS.includes(c)), [], 'no cloud command as an instruction');
+});
+
+test('sup: read tier, 6 KB, every ticket-template field, the verdict values, at most 10 tickets, no production data', () => {
+  const text = body('sup');
+  assert.equal(roster.byId.sup.tier, 'read');
+  assert.deepEqual(lintSections(text, REQUIRED_SECTIONS.sup), []);
+  assert.ok(bytes(text) <= 6 * 1024, `${bytes(text)} bytes`);
+  const ticket = section(text, '## Ticket template');
+  for (const field of ['Title', 'Severity', 'Where (path:line)', 'Evidence', 'Impact', 'Steps to reproduce / how to confirm', 'Expected vs actual', 'Suggested owner (FE/BE/SRE)', 'Suggested fix']) {
+    assert.ok(ticket.includes(`\`${field}\``), field);
+  }
+  assert.match(text, /`VERDICT: no-issues \| issues-found \| needs-information`/);
+  assert.match(text, /At most 10 tickets, most severe first/);
+  assert.match(text, /no monitoring, logs, ticket system, production access/);
+  assert.match(text, /never invent production data/i);
+  for (const w of ['health', 'timeout', 'retr', 'unhandled', 'TODO', 'FIXME', 'runbook', 'lockfile', 'PII|personal data', 'flaky|skipped']) assert.match(text, new RegExp(w, 'i'), w);
+  assert.match(text, /most likely cause/i);
+  assert.doesNotMatch(text, /\bnpx\b/);
+  assert.deepEqual(fencedCommandLines(text), []);
+});
+
+test('e2e: test tier, 7 KB, only the three test commands, re-runs a failure once, says "no runnable tests", never npx', () => {
+  const text = body('e2e');
+  assert.equal(roster.byId.e2e.tier, 'test');
+  assert.deepEqual(lintSections(text, REQUIRED_SECTIONS.e2e), []);
+  assert.ok(bytes(text) <= ROLE_MAX_BYTES, `${bytes(text)} bytes`);
+  for (const w of ['re-run', 'npm test', 'npm run test', 'npm run e2e', 'no runnable tests', 'consistent', 'flaky', 'no network']) assert.ok(text.includes(w), w);
+  assert.doesNotMatch(text, /\bnpx\b/);
+  assert.match(text, /`VERDICT: pass \| fail \| no-tests \| blocked`/);
+  for (const field of ['Commands run', 'Failures', 'Coverage gaps', 'What I did not check']) assert.ok(section(text, '## Report').includes(field), field);
+  assert.match(section(text, '## Strategy'), /edge cases/);
+  for (const w of ['empty', 'oversized', 'malformed', 'hostile', 'double submit', 'back button', 'mobile width']) assert.ok(text.includes(w), w);
+  assert.match(text, /title, steps, expected result/);
+  assert.deepEqual(fencedCommandLines(text), []);
+  assert.deepEqual(lintTierClaims(text, 'test'), []);
+});
+
+test('no role names a skill as a requirement, and every roster agent has required sections (none is pending any more)', () => {
+  assert.deepEqual(NOT_YET_REWRITTEN, []);
+  for (const a of roster.agents) {
+    assert.ok(sectionsFor(a.id).length > 0, a.id);
+    assert.doesNotMatch(a.parts.body, /anthropic-skills:|hawkscan:|superpowers:|dpdp-compliance|fastapi-standards|spring-boot-standards|react-typescript-standards/, `${a.id} names a skill`);
+  }
 });
