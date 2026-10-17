@@ -108,10 +108,33 @@ function writeResults(opts, round, base) {
   return out;
 }
 
+// Re-score the stored (already redacted) reports with the current scorer. No claude calls. The first-pass numbers are kept per run.
+function rescore(opts) {
+  const file = path.resolve(opts.rescore);
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const expected = {};
+  const files = {};
+  for (const round of doc.rounds) {
+    for (const r of round.runs) {
+      if (r.status !== 'ok' || typeof r.report !== 'string') continue;
+      expected[r.fixture] ??= loadExpected(path.join(EVAL, 'expected', `${r.fixture}.json`));
+      files[r.fixture] ??= fixtureFiles(path.join(EVAL, 'fixtures', r.fixture));
+      r.firstPass ??= { found: r.score.found, planted: r.score.planted, blocks: r.score.blocks, scorer: 1 };
+      r.score = scoreReport({ report: r.report, expected: expected[r.fixture], files: files[r.fixture] });
+    }
+    round.rescored = new Date().toISOString();
+  }
+  fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n');
+  fs.writeFileSync(file.replace(/\.json$/, '') + '.tables.md', renderTables(doc.rounds) + '\n');
+  console.log(`re-scored ${doc.rounds.reduce((n, r) => n + r.runs.filter(x => x.status === 'ok').length, 0)} stored report(s); no claude calls made.`);
+  return 0;
+}
+
 async function main() {
   let opts;
   try { opts = parseArgs(process.argv.slice(2)); } catch (e) { console.error(e.message); console.error(USAGE); process.exit(2); }
   if (opts.help) { console.log(USAGE); return 0; }
+  if (opts.rescore) return rescore(opts);
   if (opts.render) { console.log(renderTables(JSON.parse(fs.readFileSync(opts.render, 'utf8')).rounds)); return 0; }
   if (opts.list) {
     console.log('fixtures / roles / tasks:');

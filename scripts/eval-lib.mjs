@@ -40,6 +40,7 @@ runner and the real, logged-in claude CLI, and scores the reports. One claude -p
   --label <text>       name of this round in the output (default "round 1")
   --append             add this round to an existing <base>.json instead of replacing it
   --render <json>      print the markdown tables for an existing results file; no calls
+  --rescore <json>     re-score the stored reports of a results file in place with the current scorer; no calls
   --dry-run            print the run matrix and estimates; no calls
   --list               list fixtures, roles and tasks; no calls
   --keep               keep the temporary repositories
@@ -68,7 +69,7 @@ export function parseArgs(argv) {
   const o = {
     help: false, list: false, dryRun: false, yes: false, keep: false, append: false,
     roles: Object.keys(ROLE_TASKS), variants: [...VARIANTS], repeat: DEFAULT_REPEAT, maxCalls: DEFAULT_MAX_CALLS,
-    out: 'docs/prompt-eval', label: 'round 1', render: null,
+    out: 'docs/prompt-eval', label: 'round 1', render: null, rescore: null,
   };
   let only = null;
   let rolesGiven = false;
@@ -89,6 +90,7 @@ export function parseArgs(argv) {
       case '--out': o.out = takeValue(argv, i++, a); break;
       case '--label': o.label = takeValue(argv, i++, a); break;
       case '--render': o.render = takeValue(argv, i++, a); break;
+      case '--rescore': o.rescore = takeValue(argv, i++, a); break;
       default: throw new Error(`unknown argument: ${a}`);
     }
   }
@@ -166,19 +168,34 @@ function startOf(line) {
   return label;
 }
 
+// `## Critical` (also `**High**` alone on a line, `### Medium (3)`, `Low findings:`): a heading that only names a severity. Findings listed under
+// it (numbered items, bullets, bold-led lines) inherit that severity. The v0.1.0 prompts produce reports in this shape.
+const SECTION = new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\*\\*|__)?\\[?${LABEL}\\]?(?:\\*\\*|__)?[ \\t]*(?:findings?|issues?|\\(\\d+\\)|[:—–-]?[ \\t]*\\d+)?[ \\t]*:?[ \\t]*$`);
+const BOLD_HEADING = /^(?:\*\*|__)[^*_\n]+(?:\*\*|__)[ \t]*:?[ \t]*$/; // `**Personal data (DPDP)**` alone on a line ends the severity section
+const ITEM = /^(?:(?:[-*+]|\d+[.)])[ \t]+|\*\*|__)/; // unindented list item or bold-led line
+
 export function splitBlocks(report) {
   const text = String(report ?? '');
   const blocks = [];
   let cur = null;
+  let section = null; // severity named by the last severity-only heading
   let offset = 0;
   const close = end => { if (cur) { cur.end = end; cur.text = text.slice(cur.start, end).trimEnd(); blocks.push(cur); cur = null; } };
   for (const line of text.split('\n')) {
-    const label = startOf(line);
-    if (label) {
+    const sec = SECTION.exec(line);
+    const label = sec ? null : startOf(line);
+    if (sec) {
+      close(offset);
+      section = sec[1];
+    } else if (label) {
       close(offset);
       cur = { severity: label, start: offset, title: line.trim() };
-    } else if (cur && /^#{1,6}\s/.test(line)) {
+    } else if (/^#{1,6}\s/.test(line) || BOLD_HEADING.test(line)) {
       close(offset);
+      section = null;
+    } else if (section && ITEM.test(line)) {
+      close(offset);
+      cur = { severity: section, start: offset, title: line.trim() };
     }
     offset += line.length + 1;
   }
@@ -248,17 +265,30 @@ const sevRank = s => SEVERITIES.indexOf(s);
 export function scoreReport({ report, expected, files }) {
   const text = String(report ?? '');
   const blocks = splitBlocks(text);
-  const matched = new Set();
-  const issues = expected.map(issue => {
+  // via[i][k]: how block i matches planted issue k (null = not at all).
+  const via = blocks.map(b => expected.map(issue => matchIssue(issue, b, text, files)));
+  const matched = new Set(via.flatMap((row, i) => (row.some(Boolean) ? [i] : [])));
+  const issues = expected.map((issue, k) => {
+    // The block that is most about this issue, whose severity is the rating attributed to it: one that names the expected file itself, then
+    // the one matching the most of the issue's patterns (a passing mention scores 1), then the one matching the fewest planted issues
+    // (a combined block is the last resort), then the first.
     let best = null;
-    blocks.forEach((b, idx) => {
-      const via = matchIssue(issue, b, text, files);
-      if (!via) return;
-      matched.add(idx);
-      if (!best || sevRank(b.severity) < sevRank(best.block.severity) || (via === 'block' && best.via === 'near' && sevRank(b.severity) <= sevRank(best.block.severity))) best = { block: b, via };
+    blocks.forEach((blk, i) => {
+      if (!via[i][k]) return;
+      const cand = {
+        block: blk, via: via[i][k], width: via[i].filter(Boolean).length,
+        hits: issue.anyOf.filter(r => new RegExp(r, 'i').test(blk.text)).length,
+      };
+      const better = !best
+        || (cand.via === 'block') !== (best.via === 'block') ? cand.via === 'block'
+        : cand.hits !== best.hits ? cand.hits > best.hits
+          : cand.width < best.width;
+      if (!best || better) best = cand;
     });
     return {
-      id: issue.id, expectedSeverity: issue.severity, found: !!best, foundSeverity: best?.block.severity ?? null, via: best?.via ?? null,
+      id: issue.id, expectedSeverity: issue.severity, found: !!best,
+      // Content-only match: a block says it but names no expected file anywhere near. Reported next to the strict result, never instead of it.
+      looseFound: blocks.some(b => issue.anyOf.some(r => new RegExp(r, 'i').test(b.text))), foundSeverity: best?.block.severity ?? null, via: best?.via ?? null,
       foundTitle: best ? best.block.title.slice(0, 160) : null,
     };
   });
@@ -273,10 +303,18 @@ export function scoreReport({ report, expected, files }) {
   const okSev = highFound.filter(i => HIGH.has(i.foundSeverity)).length;
   return {
     planted, found, recall: planted ? found / planted : null,
+    looseFound: issues.filter(i => i.looseFound || i.found).length,
+    looseRecall: planted ? issues.filter(i => i.looseFound || i.found).length / planted : null,
     criticalHighPlanted: high.length, criticalHighFound: highFound.length, criticalHighRecall: high.length ? highFound.length / high.length : null,
     issues,
     citations: { total: cites.length, valid: validCites, hallucinated: cites.length - validCites, validity: cites.length ? validCites / cites.length : null, bad: cites.filter(c => !c.valid).map(c => c.raw) },
     severity: { checked, ok: okSev, sanity: checked ? okSev / checked : null },
+    // How the reviewer's rating compares with the planted rating, over the found issues (informational: the plant's rating is a judgement call).
+    calibration: (() => {
+      const f = issues.filter(i => i.found);
+      const rank = x => sevRank(x);
+      return { n: f.length, exact: f.filter(i => i.foundSeverity === i.expectedSeverity).length, over: f.filter(i => rank(i.foundSeverity) < rank(i.expectedSeverity)).length, under: f.filter(i => rank(i.foundSeverity) > rank(i.expectedSeverity)).length };
+    })(),
     extraFindings: extras.length,
     extraTitles: extras.map(({ b }) => b.title.slice(0, 160)),
     infoFindings: blocks.filter(b => b.severity === 'Info').length,
@@ -318,11 +356,16 @@ export function aggregateRuns(runs) {
       result[role][variant] = {
         runs: rs.length, scored: ok.length, errored: rs.filter(r => r.status === 'errored').length,
         recall: col(r => r.score.recall),
+        looseRecall: col(r => r.score.looseRecall),
         criticalHighRecall: col(r => r.score.criticalHighRecall),
         citationValidity: col(r => r.score.citations?.validity),
         hallucinated: col(r => r.score.citations?.hallucinated),
         severitySanity: col(r => r.score.severity?.sanity),
         extraFindings: col(r => r.score.extraFindings),
+        overRated: col(r => (r.score.calibration?.n ? r.score.calibration.over / r.score.calibration.n : null)),
+        underRated: col(r => (r.score.calibration?.n ? r.score.calibration.under / r.score.calibration.n : null)),
+        totalInputTokens: col(r => (r.usage ? (r.usage.input_tokens ?? 0) + (r.usage.cache_creation_input_tokens ?? 0) + (r.usage.cache_read_input_tokens ?? 0) : null)),
+        systemBytes: col(r => r.systemBytes),
         formatCompliance: ok.length ? ok.filter(r => r.score.format?.compliant).length / ok.length : null,
         wallMs: col(r => r.wallMs),
         tools: col(r => r.tools),
@@ -365,13 +408,13 @@ export function renderTables(rounds) {
     const agg = aggregateRuns(round.runs);
     lines.push(`### ${round.label}`, '');
     lines.push('Mean (min–max) over the scored runs; `n` is the number of scored runs behind each cell.', '');
-    lines.push('| Role | Variant | n | Recall | Critical/High recall | Citation validity | Hallucinated citations | Severity sanity | Extra findings | Format compliant (new-only rules) | Tool calls | Output tokens | Wall time (s) |');
-    lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+    lines.push('| Role | Variant | n | Recall (strict) | Recall (content only) | Critical/High recall | Citation validity | Hallucinated citations | Severity sanity | Over-rated (found items) | Under-rated | Extra findings | Format compliant (new-only rules) | Tool calls | Output tokens | Input tokens (incl. cache) | System prompt (bytes) | Wall time (s) |');
+    lines.push(`|${'---|'.repeat(18)}`);
     for (const role of Object.keys(agg)) {
       for (const variant of VARIANTS) {
         const a = agg[role][variant];
         if (!a) continue;
-        lines.push(`| ${role} | ${variant} | ${a.scored}${a.errored ? ` (+${a.errored} errored)` : ''} | ${mmm(a.recall, pct)} | ${mmm(a.criticalHighRecall, pct)} | ${mmm(a.citationValidity, pct)} | ${mmm(a.hallucinated, v => num(v))} | ${mmm(a.severitySanity, pct)} | ${mmm(a.extraFindings, v => num(v))} | ${pct(a.formatCompliance)} | ${mmm(a.tools, v => num(v))} | ${mmm(a.outputTokens, v => num(v, 0))} | ${mmm(a.wallMs, v => num(v / 1000, 0))} |`);
+        lines.push(`| ${role} | ${variant} | ${a.scored}${a.errored ? ` (+${a.errored} errored)` : ''} | ${mmm(a.recall, pct)} | ${mmm(a.looseRecall, pct)} | ${mmm(a.criticalHighRecall, pct)} | ${mmm(a.citationValidity, pct)} | ${mmm(a.hallucinated, v => num(v))} | ${mmm(a.severitySanity, pct)} | ${mmm(a.overRated, pct)} | ${mmm(a.underRated, pct)} | ${mmm(a.extraFindings, v => num(v))} | ${pct(a.formatCompliance)} | ${mmm(a.tools, v => num(v))} | ${mmm(a.outputTokens, v => num(v, 0))} | ${mmm(a.totalInputTokens, v => num(v, 0))} | ${num(a.systemBytes.mean, 0)} | ${mmm(a.wallMs, v => num(v / 1000, 0))} |`);
       }
     }
     lines.push('');

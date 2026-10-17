@@ -67,6 +67,37 @@ test('splitBlocks finds blocks in plain, bracketed, bold and heading styles and 
   assert.doesNotMatch(blocks[4].text, /What I checked/);
 });
 
+test('splitBlocks reads the v0.1.0 report shape: severity headings with numbered or bulleted findings under them', () => {
+  const text = [
+    '**Verdict: Do not ship.** Two Critical issues.', '',
+    '## Critical',
+    '1. **SQL injection** in `src/routes/products.js:19-21`. Concatenates q.',
+    '   - sub point that belongs to item 1',
+    '2. **Order IDOR** in `src/routes/orders.js:19`.',
+    '## High (2)',
+    '3. **Stack traces** in `src/server.js:17`.',
+    '## Medium', '- **No helmet** in `src/server.js`.',
+    '## Personal data (DPDP)', '- consent is missing',
+    '## Not checked', '- dependencies',
+  ].join('\n');
+  const blocks = splitBlocks(text);
+  assert.deepEqual(blocks.map(b => b.severity), ['Critical', 'Critical', 'High', 'Medium']);
+  assert.match(blocks[0].text, /sub point/);
+  assert.doesNotMatch(blocks[3].text, /consent/);
+  const s = scoreReport({ report: text, expected: EXPECTED, files: FILES });
+  assert.equal(s.issues.find(i => i.id === 'sqli').found, true);
+  assert.equal(s.issues.find(i => i.id === 'stack').found, true);
+  assert.equal(s.issues.find(i => i.id === 'sqli').foundSeverity, 'Critical');
+  assert.equal(s.format.verdictFirstLine, false); // the old prompts never asked for a VERDICT: line
+});
+
+test('splitBlocks: bold-only severity headings open a section and other bold-only headings close it', () => {
+  const text = ['**Verdict: Do not ship.** x', '', '**Critical**', '1. **A** at a.js:1', '2. **B** at b.js:2', '**High**', '3. **C** at c.js:3', '**Low**', '- minor', '', '**Personal data (DPDP)**', 'prose that is not a finding', '**Not checked**', '- x'].join('\n');
+  const blocks = splitBlocks(text);
+  assert.deepEqual(blocks.map(b => b.severity), ['Critical', 'Critical', 'High', 'Low']);
+  assert.doesNotMatch(blocks[3].text, /prose/);
+});
+
 test('extractCitations validates the file and the line against the fixture', () => {
   const c = extractCitations('See src/routes/auth.js:26, `src/server.js`:17, ./src/config.js:4-5, src/nope.js:3, src/server.js:99, auth.js:3, products.js:12 and https://example.test/a.js:5, Node.js:18.', FILES);
   const by = Object.fromEntries(c.map(x => [x.raw, x]));
@@ -112,6 +143,15 @@ test('a keyword in a block that cites a different file is not a hit; the file ma
   assert.equal(scoreReport({ report: also, expected: EXPECTED, files: FILES }).issues.find(i => i.id === 'jwt').found, true);
 });
 
+test('a block that says it but names no expected file is a content-only hit, not a strict one', () => {
+  const report = '[High] Reset tokens are guessable — no file named\nMath.random() is used for the token.\n';
+  const s = scoreReport({ report, expected: EXPECTED, files: FILES });
+  assert.equal(s.found, 0);
+  assert.equal(s.looseFound, 1);
+  assert.equal(s.looseRecall, 0.25);
+  assert.equal(s.issues.find(i => i.id === 'rand').looseFound, true);
+});
+
 test('severity sanity counts planted Critical/High issues rated Critical/High', () => {
   const report = '[Medium] Hard-coded fallback secret — src/config.js:4\n\n[Critical] SQL injection — src/routes/products.js:20\nstring concatenation\n';
   const s = scoreReport({ report, expected: EXPECTED, files: FILES });
@@ -119,6 +159,19 @@ test('severity sanity counts planted Critical/High issues rated Critical/High', 
   assert.equal(s.severity.ok, 1);
   assert.equal(s.severity.sanity, 0.5);
   assert.equal(scoreReport({ report: 'nothing', expected: EXPECTED, files: FILES }).severity.sanity, null);
+});
+
+test('the severity attributed to an issue comes from the block most about it, not from a combined block that merely mentions it', () => {
+  const report = [
+    '[High] Reset tokens are predictable and nothing limits guesses — src/routes/auth.js:26',
+    'Math.random() builds the token; a SQL injection concatenation elsewhere makes it worse.',
+    '',
+    '[Low] Error handler returns the stack trace — src/server.js:17',
+    'err.stack is sent back.',
+  ].join('\n');
+  const s = scoreReport({ report, expected: EXPECTED, files: FILES });
+  assert.equal(s.issues.find(i => i.id === 'stack').foundSeverity, 'Low');
+  assert.equal(s.issues.find(i => i.id === 'rand').foundSeverity, 'High');
 });
 
 test('format compliance: VERDICT first line, rubric labels, What I did not check section', () => {

