@@ -18,6 +18,8 @@ jobs:
         node: [22, 24]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the prompt-baseline test reads the v0.1.0 tag
 
       - uses: actions/setup-node@v4
         with:

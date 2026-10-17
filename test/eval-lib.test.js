@@ -374,20 +374,20 @@ test('every planted issue is spelled the way a correct finding would be (self-ch
 });
 
 // ---------- baseline fidelity ----------
-test('the baseline copies are byte-identical to v0.1.0 on main and compose to the exact v0.1.0 system prompts', { timeout: 60000 }, async t => {
+test('the baseline copies are byte-identical to v0.1.0 at the v0.1.0 tag and compose to the exact v0.1.0 system prompts', { timeout: 60000 }, async t => {
   let hasMain = true;
-  try { execFileSync('git', ['rev-parse', '--verify', '-q', 'main^{commit}'], { cwd: ROOT, stdio: 'ignore' }); } catch { hasMain = false; }
-  if (!hasMain) return t.skip('no main branch in this checkout');
+  try { execFileSync('git', ['rev-parse', '--verify', '-q', 'v0.1.0^{commit}'], { cwd: ROOT, stdio: 'ignore' }); } catch { hasMain = false; }
+  if (!hasMain) return t.skip('no v0.1.0 tag in this checkout');
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-baseline-')));
   try {
     const tar = path.join(tmp, 'main.tar');
-    execFileSync('git', ['archive', '--format=tar', '-o', tar, 'main'], { cwd: ROOT });
+    execFileSync('git', ['archive', '--format=tar', '-o', tar, 'v0.1.0'], { cwd: ROOT });
     const co = path.join(tmp, 'v010');
     fs.mkdirSync(co);
     execFileSync('tar', ['-x', '-f', tar, '-C', co]);
     const base = path.join(EVAL, 'baseline', 'agents');
     for (const f of [...fs.readdirSync(path.join(co, 'agents', 'prompts')).map(n => path.join('prompts', n)), 'roster.json']) {
-      assert.equal(fs.readFileSync(path.join(base, f), 'utf8'), fs.readFileSync(path.join(co, 'agents', f), 'utf8'), `${f} differs from main`);
+      assert.equal(fs.readFileSync(path.join(base, f), 'utf8'), fs.readFileSync(path.join(co, 'agents', f), 'utf8'), `${f} differs from v0.1.0`);
     }
     assert.deepEqual(fs.readdirSync(path.join(base, 'prompts')).sort(), fs.readdirSync(path.join(co, 'agents', 'prompts')).sort());
     // that checkout's own loadRoster is the reference
