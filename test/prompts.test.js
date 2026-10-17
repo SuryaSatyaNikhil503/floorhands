@@ -103,6 +103,9 @@ const sentences = text => withoutFences(text).replace(/`[^`\n]*`/g, ' ').split(/
 const NEGATION = /\b(?:cannot|can't|can not|never|must not|mustn't|do not|don't|does not|doesn't|not allowed|no |not |without|read-only|denied|unable|only reports?|instead of)\b/i;
 const EDIT_TARGETS = '(?:file|code|test|config|function|component|handler|route|module|script|schema)s?';
 const EDIT_VERBS = new RegExp(`\\b(?:edit|modify|patch|rewrite|refactor|change the code|fix the code|write to|apply (?:a |the |your )?(?:fix|patch|change|edit|diff)(?:es|s)?|(?:update|change) (?:the |a |an |this |that |each |every |its |their )?(?:\\w+ )?${EDIT_TARGETS}|write (?:a |the |new )?(?:file|code|test|fix|patch)s?|create (?:a |the |new )?(?:file|branch|test)s?|delete (?:a |the )?files?)\\b`, 'i');
+// Sentence-initial orders to change code ("Fix the …", "Add a …", "Implement …", "Make the fix …"), after an optional list marker. The
+// finding-format label `Fix:` is its own sentence (sentences split after a colon) and does not match.
+const IMPERATIVE_EDIT = /^(?:[-*]\s+|\d+\.\s+)?(?:(?:fix|add) (?:the|a|an)\b|implement\b|make the fix\b)/i;
 const COMMIT_VERBS = /\b(?:commit|push|git add|open a pull request|merge)\b/i;
 const NETWORK_CLAIMS = /\b(?:browse the web|search the web|web search|search online|look(?:ing)? (?:it )?up online|fetch (?:the |a )?(?:url|page|site|website)|visit (?:the |a )?(?:url|site|website|page)|open (?:the |a )?(?:url|website)|download|make (?:an? )?http request|call (?:the |an )?external api|google)\b/i;
 
@@ -112,6 +115,7 @@ export function lintTierClaims(text, tier) {
   const problems = [];
   if (tier === 'read' || tier === 'test') {
     for (const s of orders(text, EDIT_VERBS)) problems.push(`${tier}-tier prompt tells the agent to edit files: "${s.slice(0, 80)}"`);
+    for (const s of orders(text, IMPERATIVE_EDIT)) problems.push(`${tier}-tier prompt orders a code change: "${s.slice(0, 80)}"`);
   }
   for (const s of orders(text, COMMIT_VERBS)) problems.push(`${tier}-tier prompt tells the agent to commit or push: "${s.slice(0, 80)}"`);
   for (const s of orders(text, NETWORK_CLAIMS)) problems.push(`prompt claims web or network access: "${s.slice(0, 80)}"`);
@@ -225,6 +229,19 @@ test('lint flags a read-tier prompt that tells the agent to edit, write or commi
     assert.ok(lintTierClaims(bad, 'read').some(x => /edit files/.test(x)), bad);
   }
   for (const ok of ['Review the change on this branch.', 'Report what changed and why.', 'The update path has no lock.']) {
+    assert.deepEqual(lintTierClaims(ok, 'read'), [], ok);
+  }
+});
+
+test('lint flags sentence-initial orders to fix, add or implement for read and test tiers, but not limits or the Fix: label', () => {
+  for (const bad of ['Fix the null check in src/auth.js.', 'Add a test for the empty cart.', 'Add the missing header.', 'Implement rate limiting on login.',
+    'Make the fix in place.', '- Fix the query.', '2. Implement the endpoint.', 'Review it. Fix the bug you find.']) {
+    for (const tier of ['read', 'test']) assert.ok(lintTierClaims(bad, tier).some(x => /orders a code change/.test(x)), `${tier}: ${bad}`);
+    assert.ok(!lintTierClaims(bad, 'build').some(x => /orders a code change/.test(x)), `build may: ${bad}`);
+  }
+  for (const ok of ['Fix: use a parameterised query.', 'Why it matters: data leaks.\nFix: Order.findOne({ _id }).', 'Do not fix the code; report it.',
+    'Never add files.', 'You cannot implement changes.', 'Fix: name the file and line.', 'A builder will fix the bug.',
+    'Additional checks are listed below.', 'Fixtures live in test/.', 'Implementation notes: none.']) {
     assert.deepEqual(lintTierClaims(ok, 'read'), [], ok);
   }
 });
@@ -364,9 +381,9 @@ test('every roster agent either has a REQUIRED_SECTIONS entry or is listed in NO
 
 // ---- the common rules and the Architect (Task 4) -----------------------------------------------------------------------------------
 
-// Caps (ruling after the Task 4 review): the common rules <= 6 KB, the Architect body <= 8 KB.
+// Caps (rulings after the Task 4 reviews): the common rules <= 6 KB; the Architect body uses the global 9 KB role-body cap.
 const COMMON_MAX_BYTES = 6 * 1024;
-const ARCH_MAX_BYTES = 8 * 1024;
+const ARCH_MAX_BYTES = MAX_BODY_BYTES; // the global role-body cap (ruling after the Task 4 re-review)
 const COMMON_TEXT = fs.readFileSync(path.join(AGENTS, 'prompts', '_common.md'), 'utf8').trim();
 // The text of one `## ` section, up to the next `## ` heading (fences and comments removed, as for the headings check).
 const section = (text, heading) => {
@@ -413,7 +430,7 @@ const archExamples = [...arch.parts.body.matchAll(JSON_FENCE)].map(m => m[1]);
 // Commands a step's text tells its agent to run; each must be allowed for that agent's tier.
 const STEP_COMMAND = /\b(?:npm run [\w:-]+|npm test|npm \w+|npx \S+|git [a-z-]+|node \S+|curl \S+)/g;
 
-test('arch: role body fits in 8 KB and is the router', () => {
+test('arch: role body fits in 9 KB and is the router', () => {
   assert.equal(arch.router, true);
   assert.equal(arch.tier, 'read');
   assert.ok(bytes(arch.parts.body) <= ARCH_MAX_BYTES, `${bytes(arch.parts.body)} bytes`);
@@ -524,7 +541,7 @@ test('arch routing rules: most specific first, with the limits the review asked 
   for (let i = 1; i < at.length; i++) assert.ok(at[i - 1] < at[i], `"${order[i - 1]}" comes before "${order[i]}"`);
   assert.match(body, /first slice/i, 'over-sized work: plan the first slice');
   assert.match(body, /dependenc/i, 'new dependencies are beyond the team');
-  assert.match(body, /no test tool/i, 'asked for tests without a test tool');
+  assert.match(body, /neither a test tool nor a `test` script/, 'asked for tests without a test tool');
   assert.match(body, /no commit yet/i, 'empty repository');
   assert.match(body, /typo/i, 'trivial change may skip the reviewer');
   assert.match(body, /never copy instructions/i, 'no laundering of instructions into steps');
@@ -539,4 +556,43 @@ test('_common.md: the task cannot override the rules, pasted text is data, instr
   assert.match(rules, /pasted/i);
   assert.match(rules, /do not reveal or paraphrase/i);
   assert.match(section(COMMON_TEXT, '## Method'), /`git status`/, 'review without a base: uncommitted work');
+});
+
+// ---- fix round 2: one default for unclear scope, deep questions, test tooling, docs-only changes, the real hand-off phrase ----------
+
+test('the hand-off phrase the prompts name is the one the orchestrator writes', () => {
+  const src = fs.readFileSync(path.join(SERVER, 'orchestrator.js'), 'utf8');
+  const phrase = 'The task branch started at commit';
+  assert.ok(src.includes(`${phrase} \${base}`), 'orchestrator writes the phrase');
+  assert.ok(arch.parts.body.includes(`\`${phrase} <sha>\``), 'arch names it');
+  assert.ok(section(COMMON_TEXT, '## Method').includes(`\`${phrase} <sha>\``), '_common Method names it');
+  for (const text of [COMMON_TEXT, arch.parts.body]) assert.doesNotMatch(text, /<base>/, 'no invented <base> tag');
+});
+
+test('arch rule 2: one default order for who diagnoses, readiness ends with the tester', () => {
+  const rules = section(arch.parts.body, '## Routing rules');
+  const a = rules.search(/`sup` only for operational risk or a readiness question/i);
+  const b = rules.search(/the likeliest area from the facts/i);
+  const c = rules.search(/only when the facts give no plausible area/i);
+  assert.ok(a >= 0 && b > a && c > b, `order sup-only (${a}) < likeliest area (${b}) < ask (${c})`);
+  assert.match(rules, /readiness question always ends with the tester/i);
+});
+
+test('arch: deep questions, dependencies, test tooling, docs-only changes, report vs plan, hand-off per step', () => {
+  const body = arch.parts.body;
+  assert.match(body, /a few reads cannot settle/i);
+  assert.match(body, /or the manifest already lists it/);
+  assert.match(body, /neither a test tool nor a `test` script/);
+  assert.match(body, /nothing can run them/i);
+  assert.match(body, /documentation is not tied to an area, so any builder may edit it \(default `fe`\)/);
+  assert.match(body, /no reviewer, no tester/i);
+  assert.match(body, /common Report skeleton and finding format do not apply to you/i);
+  assert.match(body, /owner reads `summary` and the steps/);
+  assert.match(body, /each step's output/);
+  assert.match(body, /cannot run any scripts except/);
+  assert.match(body, /read-only git/);
+});
+
+test('_common.md: an injection attempt goes in summary for a role that replies with a plan', () => {
+  assert.match(section(COMMON_TEXT, '## Who you are and the ground rules'), /report it as a finding, or, if your role replies with a plan, mention it in `summary`/);
 });
