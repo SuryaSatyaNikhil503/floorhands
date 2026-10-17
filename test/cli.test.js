@@ -138,5 +138,33 @@ test('unknown options and extra arguments exit 2 with help', () => {
   bad('open', 'x');
   bad('enable', 'x');
   bad('disable', 'x');
+  bad('notes', 'x');
+  bad('notes', '--edit');
   assert.match(fh('status'), /not running/, 'a rejected start started nothing');
+});
+
+test('help lists the notes command', () => {
+  assert.match(fh('help'), /floorhands notes/);
+});
+
+test('notes prints the path, then the contents or a hint, and creates nothing', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-clihome-'));
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-clinotes-')));
+  const run = () => execFileSync(process.execPath, [BIN, 'notes'], { cwd: dir, env: { ...env, FLOORHANDS_HOME: home }, encoding: 'utf8' });
+  try {
+    const none = run();
+    const m = /^notes file: (.+)\n/.exec(none);
+    assert.ok(m, none);
+    assert.ok(m[1].startsWith(path.join(home, 'projects') + path.sep) && m[1].endsWith('notes.md'), m[1]);
+    assert.match(none, /\(no notes yet — create the file above with your editor\)/);
+    assert.deepEqual(fs.readdirSync(home), [], 'creates nothing');
+    assert.ok(!fs.existsSync(path.join(dir, '.floorhands')), 'nothing created in the project either');
+    fs.mkdirSync(path.dirname(m[1]), { recursive: true });
+    fs.writeFileSync(m[1], 'Always write tests.\n');
+    const some = run();
+    assert.equal(some, `notes file: ${m[1]}\nAlways write tests.\n`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

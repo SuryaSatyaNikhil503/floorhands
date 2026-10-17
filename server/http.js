@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { publicAgent } from './roster.js';
+import { loadNotes } from './notes.js';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 const TASK_ROUTE = /^\/api\/tasks\/([^/]+)(?:\/(diff|approve|reject))?$/;
@@ -65,7 +66,8 @@ export function createApp({ root, roster, store, orchestrator, hub, uiDir, log =
       if (req.method === 'GET' && p === '/api/health') return send(res, 200, { ok: true, name: 'floorhands', project: root });
 
       if (req.method === 'GET' && p === '/api/state') {
-        return send(res, 200, { project: root, roster: { pods: roster.pods, agents: roster.agents.map(publicAgent) }, tasks: store.listTasks(root) });
+        const { path: notesFile, bytes } = loadNotes(root); // path and size only: the contents never leave the server
+        return send(res, 200, { project: root, roster: { pods: roster.pods, agents: roster.agents.map(publicAgent) }, tasks: store.listTasks(root), notes: { path: notesFile, bytes } });
       }
 
       if (req.method === 'GET' && p === '/api/events') {

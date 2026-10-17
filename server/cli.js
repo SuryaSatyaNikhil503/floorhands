@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stateDir } from './store.js';
+import { loadNotes } from './notes.js';
 import {
   findProjectRoot, readServerInfo, clearServerInfo, isEnabled, setEnabled, ensureExclude, pidAlive, serverUp,
 } from './state.js';
@@ -17,6 +18,7 @@ const HELP = `floorhands — an office of Claude-powered engineering agents.
   floorhands status                 is it running? is auto-start on?
   floorhands stop                   stop this project's office
   floorhands enable | disable       turn auto-start (Claude Code session hook) on or off for this project
+  floorhands notes                  show your standing notes for this project (kept outside the repository) and where to edit them
 `;
 
 async function live(root) {
@@ -92,7 +94,7 @@ async function stop(root, out) {
 
 export async function main(argv, { out = process.stdout, cwd = process.cwd() } = {}) {
   const [cmd = 'help', ...rest] = argv;
-  const known = ['start', 'open', 'status', 'stop', 'enable', 'disable'];
+  const known = ['start', 'open', 'status', 'stop', 'enable', 'disable', 'notes'];
   if (known.includes(cmd)) {
     const bad = rest.find(a => !(cmd === 'start' && a === '--if-enabled'));
     if (bad !== undefined) {
@@ -131,6 +133,12 @@ export async function main(argv, { out = process.stdout, cwd = process.cwd() } =
       setEnabled(root, false);
       out.write(`auto-start off for ${root}\n`);
       return 0;
+    case 'notes': {
+      const n = loadNotes(root);
+      out.write(`notes file: ${n.path}\n`);
+      out.write(n.text ? `${n.text}${n.text.endsWith('\n') ? '' : '\n'}` : '(no notes yet — create the file above with your editor)\n');
+      return 0;
+    }
     case 'help': case '--help': case '-h':
       out.write(HELP);
       return 0;

@@ -162,3 +162,13 @@ test('floor accessibility markup: group role with a title, status text hidden vi
   assert.match(html, /id="boot"[^>]*aria-live="assertive"/);
   assert.match(read('style.css'), /\.sr-only\s*\{[^}]*clip/);
 });
+
+test('the project notes line is a static element filled with textContent only', () => {
+  const html = read('index.html');
+  assert.match(html, /<p id="notes-line"[^>]*class="muted"[^>]*><\/p>/);
+  const src = read('app.js');
+  assert.match(src, /\$\('#notes-line'\)\.textContent\s*=/);
+  assert.match(src, /Project notes: none · create /);
+  assert.match(src, /Project notes: \$\{[^}]+\} bytes · edit /);
+  assert.ok(!/notes[^\n]*innerHTML/i.test(src));
+});

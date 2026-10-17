@@ -283,6 +283,10 @@ async function loadState() {
   };
   state.tasks = (Array.isArray(s.tasks) ? s.tasks : []).filter(t => t && typeof t.id === 'string');
   $('#project').textContent = state.project;
+  const notes = s.notes && typeof s.notes === 'object' ? s.notes : {};
+  const notesFile = String(notes.path ?? '');
+  const noteBytes = Number.isSafeInteger(notes.bytes) && notes.bytes > 0 ? notes.bytes : 0;
+  $('#notes-line').textContent = !notesFile ? '' : noteBytes ? `Project notes: ${noteBytes} bytes · edit ${notesFile}` : `Project notes: none · create ${notesFile}`;
   buildFloor();
   renderTasks();
 }

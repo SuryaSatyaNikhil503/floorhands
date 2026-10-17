@@ -7,6 +7,7 @@ import path from 'node:path';
 import net from 'node:net';
 import * as store from '../server/store.js';
 import { createApp, createHub } from '../server/http.js';
+import { notesPath } from '../server/notes.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-http-'));
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-ui-'));
@@ -67,6 +68,26 @@ test('health and state never leak the agents\' system prompts', async () => {
   assert.equal(s.status, 200);
   assert.ok(!s.body.includes('SECRET-PROMPT'));
   assert.equal(JSON.parse(s.body).roster.agents[0].id, 'arch');
+});
+
+test('state reports the notes file path and size, never its contents', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-httphome-'));
+  const saved = process.env.FLOORHANDS_HOME;
+  process.env.FLOORHANDS_HOME = home;
+  try {
+    let s = JSON.parse((await request({ path: '/api/state' })).body);
+    assert.deepEqual(s.notes, { path: notesPath(root), bytes: 0 });
+    assert.ok(notesPath(root).startsWith(home));
+    fs.mkdirSync(path.dirname(notesPath(root)), { recursive: true });
+    fs.writeFileSync(notesPath(root), 'PRIVATE-OWNER-NOTE-TEXT');
+    const raw = (await request({ path: '/api/state' })).body;
+    s = JSON.parse(raw);
+    assert.deepEqual(s.notes, { path: notesPath(root), bytes: 23 });
+    assert.ok(!raw.includes('PRIVATE-OWNER-NOTE-TEXT'), 'contents are not in the state payload');
+  } finally {
+    if (saved === undefined) delete process.env.FLOORHANDS_HOME; else process.env.FLOORHANDS_HOME = saved;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('POST /api/tasks creates a task and starts it', async () => {

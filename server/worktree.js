@@ -25,9 +25,12 @@ export async function isGitRepo(root) {
   try { await git(root, ['rev-parse', '--verify', 'HEAD']); return true; } catch { return false; }
 }
 
+// Where floorhands keeps its own files outside any repository, and the per-project folder name derived from the root.
+export const floorhandsHome = () => process.env.FLOORHANDS_HOME || path.join(os.homedir(), '.floorhands');
+export const projectKey = root => crypto.createHash('sha1').update(root).digest('hex').slice(0, 10);
+
 export function worktreeBase(root) {
-  const home = process.env.FLOORHANDS_HOME || path.join(os.homedir(), '.floorhands');
-  return path.join(home, 'worktrees', crypto.createHash('sha1').update(root).digest('hex').slice(0, 10));
+  return path.join(floorhandsHome(), 'worktrees', projectKey(root));
 }
 
 export async function createWorktree(root, taskId, { base = worktreeBase(root) } = {}) {
