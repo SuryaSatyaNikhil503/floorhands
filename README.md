@@ -374,7 +374,18 @@ Full evidence is in [docs/spike-findings.md](docs/spike-findings.md) and the JSO
 
 The version 2 prompts were compared with the original ones on three small sample projects with problems planted in them. The method, the scoring and the results are in [docs/prompt-eval.md](docs/prompt-eval.md). Three small projects say little about your repository; read the numbers as a check on the prompts, not as a promise.
 
-<!-- EVAL-RESULTS: filled in after the evaluation run -->
+**Result.** Both versions found nearly every planted problem, so recall cannot tell them apart; this is a ceiling effect, not a win.
+
+| Reviewer | Planted problems found, old prompts | Planted problems found, new prompts |
+|---|---|---|
+| Back end (Express) | 92% | 100% |
+| Front end (React) | 100% | 100% |
+| AWS (Terraform and GitHub Actions) | 100% | 100% |
+
+What did differ is the shape of the report. All six new reports open with a `VERDICT:` line and follow the required format (none of the six old reports do, because the old prompts never asked for it). The new reports rate problems closer to the rating that was planted, and list fewer extra findings (0 to 4 against 6 to 13). Citations were checked against the files: none were invented in either version. The new system prompt is about six times larger, but the tokens used per run did not rise (output tokens were 8 to 27% higher).
+
+Read it with these limits in mind: two runs per cell, three projects, 24 planted problems, the same model family wrote the projects, the answer key and the reports, and the scorer was fixed after the first results (the fix and the first-pass numbers are disclosed in the report). The builders, the tester, the support engineer, the SRE and the Architect were not measured. The evaluation also found one real defect, that two reviewer prompts told the agent to read `.env.example`, which the permission model denies; it is fixed in 0.2.0.
+
 
 **Not verified:** Linux (the sandbox there needs bubblewrap and socat and has not been tried); Windows (not supported); other Claude Code versions (re-run the probes after upgrading `claude`); how the CLI expands `~` in the credential rules (the probes used the same rules with a fake home's absolute path); and the plugin in an interactive Claude Code session. `floorhands:floorhands` was confirmed in the skill list of real `claude -p` sessions, with the plugin installed and with `--plugin-dir`, and both manifests pass `claude plugin validate`, but the skill and the SessionStart hook have not been exercised interactively, and the Claude desktop app and IDE extensions were not tested. `scripts/smoke.mjs` (a real review task end to end) has not been run.
 

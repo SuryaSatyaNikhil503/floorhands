@@ -237,12 +237,13 @@ code, no review of a change (a diff against a base commit), no owner notes, no r
 
 ## Findings about the product (not about scoring)
 
-- **`.env.example` is denied to the agents but named in the new prompts.** `agents/prompts/rbe.md` and `rfe.md` (Search recipes) say
+- **`.env.example` is denied to the agents but was named in the new prompts (fixed after this run: both prompts now say not to read it).** `agents/prompts/rbe.md` and `rfe.md` (Search recipes) say
   "Read `.env.example`, never `.env*` (denied)", but the read tier denies `Read(**/.env*)` in `server/tiers.js`, and that pattern matches
   `.env.example`. All 4 new `rbe` and `rfe` reports list it as unread (three say access was denied, one says it was not opened); none
   of the old reports mention it. The reports stay honest, but a call was
   wasted and the key-scope question (is `VITE_NEWS_API_KEY` public?) went unanswered. The fix is a prompt edit (stop recommending
-  `.env.example`) or a narrower deny rule (an owner decision in `tiers.js`); neither was made here because recall did not drop.
+  `.env.example`) or a narrower deny rule (an owner decision in `tiers.js`). The prompt edit was made after this run; the reports above
+  were produced before it.
 - Total input tokens did not rise with the larger system prompt (cached input and fewer tool calls), but output tokens did, by about
   8-27%.
 
