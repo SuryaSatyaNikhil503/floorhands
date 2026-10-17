@@ -17,10 +17,10 @@ Not yet verified / accepted limits:
 - A prompt injection in `CLAUDE.md` that the model actually follows (the probe's model did not attempt it).
 - The CLI's `~` expansion for the new credential rules (HOME cannot be overridden without logging the CLI out; probes used the same rules for a fake home's absolute path).
 - The sandbox on Linux; other CLI versions.
-- Roster skill names: several do not resolve as written (see the skill map in `docs/spike-findings.md`); the prompts phase decides.
+- Roster skill names: several do not resolve as written (see the skill map in `docs/spike-findings.md`). Settled in 0.2.0: skill entries are hints shown only when the detected stack matches, never requirements (see below).
 - `scripts/smoke.mjs` (a real review task end to end) has never run.
-- The `/floorhands:floorhands` skill and SessionStart hook pass `claude plugin validate` but have not run in a live session.
-- `scripts/install.sh` and `claude plugin marketplace add` / `install` have not been run (they change PATH and Claude config).
+- The `/floorhands:floorhands` skill and SessionStart hook pass `claude plugin validate` but have not run in a live interactive session. (Update, 2026-10-17: the skill is listed as `floorhands:floorhands` in the init event of a `claude -p` session, both with `--plugin-dir` and installed; see the documentation pass below.)
+- `scripts/install.sh` and `claude plugin marketplace add` / `install` had not been run when 0.1.0 was written (they change PATH and Claude config). See the documentation pass below.
 
 ## Fixed before release
 
@@ -46,3 +46,24 @@ Three first-use problems found in the final review were fixed before this releas
 - `ui/model.js` was added (pure, DOM-free logic so the UI's behaviour is testable).
 - `test/cli.test.js` was changed in the final fix wave to poll for the losing server to exit (a latent race in the concurrent-start test).
 - Task 12's visual check (browser pane, fake claude) was done by hand: floor, task flow, approve, reject, failure state, phone layout.
+
+## Prompts v2 and the documentation pass (0.2.0, 2026-10-17)
+
+What changed: stack facts (`server/stack.js`), owner notes (`server/notes.js`), per-task prompt composition (`server/prompt.js`, `server/roster.js`), routing hints and the change-under-review hint (`server/orchestrator.js`), and all nine prompts rewritten, with a lint (`test/prompts.test.js`). The design is in `docs/design/prompts-v2-design.md`. `server/tiers.js` was not touched, so the 0.1.0 permission probes still describe the permission model.
+
+**Verified while documenting it (macOS, Claude Code 2.1.296, git 2.50.1, Node 24):**
+
+- `claude plugin validate claude-plugin` and `claude plugin validate .` pass.
+- In a throwaway Claude Code configuration (`HOME` and `CLAUDE_CONFIG_DIR` pointed at a temporary folder, so the real configuration was untouched): `claude plugin marketplace add <clone>`, `claude plugin install floorhands@floorhands`, `claude plugin list`, `disable`, `enable`, `update` (reports that a plugin read from a folder has nothing to update), `marketplace update`, `uninstall` and `marketplace remove` all work. The plugin is read in place from `claude-plugin/` in the clone. The init event of a `claude -p` session listed `floorhands:floorhands` as a skill both with the plugin installed and with `--plugin-dir`.
+- `scripts/install.sh` with a temporary `HOME`: creates the symlink, prints the PATH note when needed, is safe to repeat, and changes nothing else.
+- With the fake `claude` in a throwaway repository: `floorhands start`, `status`, `notes` (prints the path and creates nothing, not even the folder), the notes line data in `/api/state` (path and size only), a task through to awaiting approval with the stored `facts`, Approve, `stop`, `enable` and `disable`, and the SessionStart hook printing the URL for an enabled project.
+
+**Not verified:** the skill and hook in a live interactive session; the Claude desktop app and IDE extensions; Linux; how the version 2 prompts perform on real repositories beyond the evaluation in `docs/prompt-eval.md`.
+
+**Follow-ups opened by this release:**
+
+1. `scripts/install.sh` still ends with "Then use /floorhands"; the verified name is `/floorhands:floorhands`.
+2. `claude-plugin/.claude-plugin/plugin.json` still says version 0.1.0; bump it with the next plugin change.
+3. The system prompt (with notes and facts) travels on the `claude` command line, so other local users can read it with `ps`. Moving it to a file or stdin needs checking against the CLI.
+4. Harden the git calls that are not yet hardened against a hostile `.git/config`: project-root discovery, worktree creation, the read tier's git commands and the Approve merge.
+5. `floorhands notes` could offer to create the notes folder and file; today the user runs `mkdir -p` first.
