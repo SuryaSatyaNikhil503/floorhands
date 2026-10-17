@@ -1,6 +1,6 @@
 // Prompt lint: ties every shipped agent prompt to the permission model in server/tiers.js (see docs/design/prompts-v2-design.md, section 6).
-// The helpers are unit-tested against synthetic prompts that DO violate each rule. The required-sections case of a role is `todo` while
-// its prompt is still the v0.1.0 prose (none of its required headings exist) and a real test from its rewrite on (see todoReason).
+// The helpers are unit-tested against synthetic prompts that DO violate each rule. The required-sections case of a role is `todo` only
+// while the role is listed in NOT_YET_REWRITTEN and its body has none of its required headings (see todoReason).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -16,18 +16,18 @@ const AGENTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'ag
 const MAX_BODY_BYTES = 9 * 1024;
 const NOTES_BYTES = 4 * 1024;
 
-// Required headings. THE one place to extend: Tasks 5-6 add each role's headings here, keyed by agent id.
-// `_common` is agents/prompts/_common.md, the shared rules every agent receives first (it holds the shared `## Method` and `## Report`);
-// every other key is an agent id and lists that role body's own headings. An agent without an entry needs UNLISTED_ROLE_SECTIONS, so a
-// rewritten body cannot skip the table. The sections case turns from `todo` into a real test as soon as a body has any required heading
-// (see `todoReason`), so a half-finished rewrite fails instead of hiding behind the flag.
-const UNLISTED_ROLE_SECTIONS = ['## Method', '## Report'];
+// Required headings. THE one place to extend: Tasks 5-6 add each role's headings here, keyed by agent id, and in the same change remove
+// that id from NOT_YET_REWRITTEN. `_common` is agents/prompts/_common.md, the shared rules every agent receives first (it holds the shared
+// `## Method` and `## Report`, so role bodies do not repeat them); every other key is an agent id and lists that role body's own headings.
 export const REQUIRED_SECTIONS = {
   _common: ['## Who you are and the ground rules', '## Method', '## Severity', '## Finding format', '## Report',
     '## Working with other agents', '## When something is missing'],
   arch: ['## Your job', '## Routing rules', '## Plan quality', '## Plan format', '## Answering directly', '## Architecture advice'],
 };
-const sectionsFor = id => (Object.hasOwn(REQUIRED_SECTIONS, id) ? REQUIRED_SECTIONS[id] : UNLISTED_ROLE_SECTIONS);
+const sectionsFor = id => (Object.hasOwn(REQUIRED_SECTIONS, id) ? REQUIRED_SECTIONS[id] : []);
+// Roles whose prompts are still the v0.1.0 prose. This list may only shrink (asserted below): Tasks 5-6 empty it.
+export const NOT_YET_REWRITTEN = ['rfe', 'rbe', 'raws', 'fe', 'be', 'sre', 'sup', 'e2e'];
+const PENDING_AT_TASK_4 = new Set(['rfe', 'rbe', 'raws', 'fe', 'be', 'sre', 'sup', 'e2e']);
 
 // ---- lint helpers ---------------------------------------------------------------------------------------------------------------
 
@@ -101,7 +101,8 @@ export function lintCommands(text, tier) {
 // Prose rules. A sentence that also carries a negation or limitation ("You cannot edit files") is describing a limit, not giving an order.
 const sentences = text => withoutFences(text).replace(/`[^`\n]*`/g, ' ').split(/(?<=[.!?:;])\s+|\n+/).map(s => s.trim()).filter(Boolean);
 const NEGATION = /\b(?:cannot|can't|can not|never|must not|mustn't|do not|don't|does not|doesn't|not allowed|no |not |without|read-only|denied|unable|only reports?|instead of)\b/i;
-const EDIT_VERBS = /\b(?:edit|modify|patch|rewrite|refactor|change the code|fix the code|apply (?:a |the )?(?:fix|patch|change)s?|write (?:a |the |new )?(?:file|code|test|fix|patch)s?|create (?:a |the |new )?(?:file|branch|test)s?|delete (?:a |the )?files?)\b/i;
+const EDIT_TARGETS = '(?:file|code|test|config|function|component|handler|route|module|script|schema)s?';
+const EDIT_VERBS = new RegExp(`\\b(?:edit|modify|patch|rewrite|refactor|change the code|fix the code|write to|apply (?:a |the |your )?(?:fix|patch|change|edit|diff)(?:es|s)?|(?:update|change) (?:the |a |an |this |that |each |every |its |their )?(?:\\w+ )?${EDIT_TARGETS}|write (?:a |the |new )?(?:file|code|test|fix|patch)s?|create (?:a |the |new )?(?:file|branch|test)s?|delete (?:a |the )?files?)\\b`, 'i');
 const COMMIT_VERBS = /\b(?:commit|push|git add|open a pull request|merge)\b/i;
 const NETWORK_CLAIMS = /\b(?:browse the web|search the web|web search|search online|look(?:ing)? (?:it )?up online|fetch (?:the |a )?(?:url|page|site|website)|visit (?:the |a )?(?:url|site|website|page)|open (?:the |a )?(?:url|website)|download|make (?:an? )?http request|call (?:the |an )?external api|google)\b/i;
 
@@ -132,11 +133,12 @@ export function lintSize(body) {
   return bytes(body) > MAX_BODY_BYTES ? [`role body is ${bytes(body)} bytes (limit ${MAX_BODY_BYTES})`] : [];
 }
 
-// Self-arming todo: a prompt that has none of its required headings is still the v0.1.0 prose awaiting its rewrite (a TODO). The moment
-// any required heading exists, the rewrite has started and the case is a real test that fails until every required heading is there.
-export function todoReason(agent, required = sectionsFor(agent.id)) {
+// A role listed in `pending` whose body has none of its required headings is still the v0.1.0 prose awaiting its rewrite (a TODO). Any
+// other role is a real test; so is a pending role the moment any required heading exists (the rewrite has started).
+export function todoReason(agent, { required = sectionsFor(agent.id), pending = NOT_YET_REWRITTEN } = {}) {
+  if (!pending.includes(agent.id)) return false;
   const present = required.length - lintSections(agent.parts.body, required).length;
-  return present === 0 ? 'enabled by the prompt rewrite (Tasks 4-6)' : false;
+  return present === 0 ? 'awaiting its prompt rewrite (Tasks 5-6)' : false;
 }
 
 export function lintAgent(agent, { required = sectionsFor(agent.id) } = {}) {
@@ -218,6 +220,13 @@ test('lint flags a read-tier prompt that tells the agent to edit, write or commi
   assert.ok(lintTierClaims('Modify the failing code to make the tests pass.', 'read').length >= 1);
   assert.ok(lintTierClaims('Edit the test and re-run it.', 'test').length >= 1);
   assert.ok(lintTierClaims('Commit your changes when done.', 'build').length >= 1);
+  for (const bad of ['Update the config file with the new port.', 'Change the handler to return 404.', 'Write to the log file.',
+    'Apply the fixes the reviewer listed.', 'Rewrite the loop.', 'Patch the route.', 'Update its tests.']) {
+    assert.ok(lintTierClaims(bad, 'read').some(x => /edit files/.test(x)), bad);
+  }
+  for (const ok of ['Review the change on this branch.', 'Report what changed and why.', 'The update path has no lock.']) {
+    assert.deepEqual(lintTierClaims(ok, 'read'), [], ok);
+  }
 });
 
 test('lint accepts a prompt that only describes tier limits', () => {
@@ -234,8 +243,9 @@ test('lint flags prompts that claim web or network access', () => {
 });
 
 test('lint flags missing sections and an oversized body', () => {
-  assert.deepEqual(lintSections('## Method\ntext\n## Report\ntext', UNLISTED_ROLE_SECTIONS), []);
-  assert.deepEqual(lintSections('## Method\ntext', UNLISTED_ROLE_SECTIONS), ['missing required section "## Report"']);
+  const MR = ['## Method', '## Report'];
+  assert.deepEqual(lintSections('## Method\ntext\n## Report\ntext', MR), []);
+  assert.deepEqual(lintSections('## Method\ntext', MR), ['missing required section "## Report"']);
   assert.deepEqual(lintSections('See ## Method inline', ['## Method']), ['missing required section "## Method"'], 'a heading must start a line');
   assert.equal(lintSize('x'.repeat(MAX_BODY_BYTES)).length, 0);
   assert.equal(lintSize('x'.repeat(MAX_BODY_BYTES + 1)).length, 1);
@@ -250,25 +260,27 @@ test('lintAgent reports every kind of violation in one synthetic prompt', () => 
       body: '## Method\nRun `npx audit`, `cat .env` and `git push`. Edit the files. See /Users/x. Written for Abhudaya by surya@example.com.',
     },
   };
-  const p = lintAgent(agent).join('\n');
+  const p = lintAgent(agent, { required: ['## Method', '## Report'] }).join('\n');
   for (const re of [/missing required section "## Report"/, /npx audit/, /cat \.env/, /git push/, /edit files/, /home-directory/, /project name/, /email/]) assert.match(p, re);
 });
 
-test('the sections case arms itself: todo while no required heading exists, a real test as soon as one does', () => {
+test('the sections case: todo only for a pending role with none of its headings; a real test otherwise', () => {
   const mk = body => ({ id: 'x', name: 'X', tier: 'read', skills: [], parts: { intro: 'You are X.', tierNote: 'Tier: READ-ONLY.', body } });
+  const opts = { required: ['## Method', '## Report'], pending: ['x'] };
   const none = mk('Review the code and report.');
-  assert.equal(typeof todoReason(none), 'string', 'unrewritten prompt: still a todo');
+  assert.equal(typeof todoReason(none, opts), 'string', 'pending and unrewritten: still a todo');
+  assert.equal(todoReason(none, { ...opts, pending: [] }), false, 'not pending: always a real test');
   // Sections exist but the prompt breaks rules: the case is NOT todo, and the lint reports the failures it would fail the run on.
   const rewritten = mk('## Method\nRun `npx audit` then `cat .env`; edit the files.\n## Report\nSee /Users/x for Abhudaya.');
-  assert.equal(todoReason(rewritten), false);
-  const problems = lintAgent(rewritten).join('\n');
+  assert.equal(todoReason(rewritten, opts), false);
+  const problems = lintAgent(rewritten, opts).join('\n');
   for (const re of [/npx audit/, /cat \.env/, /edit files/, /home-directory/, /project name/]) assert.match(problems, re);
   // Partly rewritten (only one heading): armed, and the missing one is reported.
   const partial = mk('## Method\nLook at the code.');
-  assert.equal(todoReason(partial), false);
-  assert.deepEqual(lintSections(partial.parts.body, sectionsFor('x')), ['missing required section "## Report"']);
-  // A role-specific heading added to the table is enforced once the common ones exist.
-  assert.deepEqual(lintSections('## Method\n## Report', [...UNLISTED_ROLE_SECTIONS, '## Plan format']), ['missing required section "## Plan format"']);
+  assert.equal(todoReason(partial, opts), false);
+  assert.deepEqual(lintSections(partial.parts.body, opts.required), ['missing required section "## Report"']);
+  // A role body is not required to repeat the common headings; an agent without a table entry has no required headings.
+  assert.deepEqual(sectionsFor('x'), []);
 });
 
 test('lintSections does not count headings hidden in a code fence or an HTML comment', () => {
@@ -283,7 +295,7 @@ test('lintSections does not count headings hidden in a code fence or an HTML com
   assert.deepEqual(lintSections('## Method\n```\n## Report\n```\n<!-- x -->\n## Report\n', req), []);
   // The self-arming case is not armed by headings that only appear in a fence or a comment.
   const hidden = { id: 'x', name: 'X', tier: 'read', skills: [], parts: { intro: 'You are X.', tierNote: 'Tier: READ-ONLY.', body: '```\n## Method\n```\n<!--\n## Report\n-->' } };
-  assert.equal(typeof todoReason(hidden), 'string');
+  assert.equal(typeof todoReason(hidden, { required: req, pending: ['x'] }), 'string');
 });
 
 // ---- limits that hold for the shipped roster today -------------------------------------------------------------------------------
@@ -330,12 +342,31 @@ for (const agent of roster.agents) {
 
 for (const agent of roster.agents) {
   test(`${agent.id}: has the required sections`, { todo: todoReason(agent) }, () => {
+    assert.ok(sectionsFor(agent.id).length > 0, 'a rewritten role lists its headings in REQUIRED_SECTIONS');
     assert.deepEqual(lintSections(agent.parts.body, sectionsFor(agent.id)), []);
   });
 }
 
+test('every roster agent either has a REQUIRED_SECTIONS entry or is listed in NOT_YET_REWRITTEN, and that list only shrinks', () => {
+  const ids = roster.agents.map(a => a.id);
+  for (const id of ids) {
+    const listed = Object.hasOwn(REQUIRED_SECTIONS, id);
+    const pending = NOT_YET_REWRITTEN.includes(id);
+    assert.ok(listed !== pending, `${id}: needs exactly one of a REQUIRED_SECTIONS entry or a NOT_YET_REWRITTEN listing`);
+  }
+  assert.equal(new Set(NOT_YET_REWRITTEN).size, NOT_YET_REWRITTEN.length, 'no duplicates');
+  for (const id of NOT_YET_REWRITTEN) {
+    assert.ok(PENDING_AT_TASK_4.has(id), `${id} was not pending at Task 4; the list may only shrink`);
+    assert.ok(ids.includes(id), `${id} is not in the roster`);
+  }
+  for (const key of Object.keys(REQUIRED_SECTIONS)) assert.ok(key === '_common' || ids.includes(key), `${key} is not a roster agent`);
+});
+
 // ---- the common rules and the Architect (Task 4) -----------------------------------------------------------------------------------
 
+// Caps (ruling after the Task 4 review): the common rules <= 6 KB, the Architect body <= 8 KB.
+const COMMON_MAX_BYTES = 6 * 1024;
+const ARCH_MAX_BYTES = 8 * 1024;
 const COMMON_TEXT = fs.readFileSync(path.join(AGENTS, 'prompts', '_common.md'), 'utf8').trim();
 // The text of one `## ` section, up to the next `## ` heading (fences and comments removed, as for the headings check).
 const section = (text, heading) => {
@@ -347,9 +378,9 @@ const section = (text, heading) => {
   return next < 0 ? rest : rest.slice(0, next);
 };
 
-test('_common.md: has its required sections, fits in 5 KB and keeps the name and role placeholders', () => {
+test('_common.md: has its required sections, fits in 6 KB and keeps the name and role placeholders', () => {
   assert.deepEqual(lintSections(COMMON_TEXT, REQUIRED_SECTIONS._common), []);
-  assert.ok(bytes(COMMON_TEXT) <= 5 * 1024, `${bytes(COMMON_TEXT)} bytes`);
+  assert.ok(bytes(COMMON_TEXT) <= COMMON_MAX_BYTES, `${bytes(COMMON_TEXT)} bytes`);
   assert.match(COMMON_TEXT, /\{\{name\}\}/);
   assert.match(COMMON_TEXT, /\{\{role\}\}/);
 });
@@ -382,10 +413,10 @@ const archExamples = [...arch.parts.body.matchAll(JSON_FENCE)].map(m => m[1]);
 // Commands a step's text tells its agent to run; each must be allowed for that agent's tier.
 const STEP_COMMAND = /\b(?:npm run [\w:-]+|npm test|npm \w+|npx \S+|git [a-z-]+|node \S+|curl \S+)/g;
 
-test('arch: role body fits in 7 KB and is the router', () => {
+test('arch: role body fits in 8 KB and is the router', () => {
   assert.equal(arch.router, true);
   assert.equal(arch.tier, 'read');
-  assert.ok(bytes(arch.parts.body) <= 7 * 1024, `${bytes(arch.parts.body)} bytes`);
+  assert.ok(bytes(arch.parts.body) <= ARCH_MAX_BYTES, `${bytes(arch.parts.body)} bytes`);
 });
 
 test('arch: routing rules name each rule the orchestrator relies on', () => {
@@ -409,4 +440,103 @@ test('arch: every JSON example parses with parsePlan, names only real non-router
   assert.ok(plans.some(p => p.steps.length === 0), 'one example answers directly with no steps');
   const tiers = p => p.steps.map(s => roster.byId[s.agent].tier).join(' ');
   assert.ok(plans.some(p => tiers(p) === 'build read test' && p.steps.at(-1).agent === 'e2e'), 'one example is builder -> reviewer -> tester last');
+});
+
+test('arch: every example step has a verifiable "Done when" and prescribes no report format', () => {
+  for (const raw of archExamples) {
+    for (const step of parsePlan(`\`\`\`json\n${raw}\`\`\``, stepIds).steps) {
+      assert.match(step.task, /Done when: /, `${step.agent}: ${step.task.slice(0, 60)}`);
+      assert.doesNotMatch(step.task, /\bReport\b|\bVERDICT\b/, `${step.agent} example prescribes a report format`);
+    }
+  }
+});
+
+// ---- prose tied to code: the numbers and lists the prompts state must match the code that enforces them ----------------------------
+
+const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server');
+// BLOCK_MAX and CTX_MAX are not exported by server/orchestrator.js (and this task may not edit it), so read them from its source.
+const orchestratorConst = name => {
+  const m = new RegExp(`^const ${name} = (\\d+);`, 'm').exec(fs.readFileSync(path.join(SERVER, 'orchestrator.js'), 'utf8'));
+  assert.ok(m, `server/orchestrator.js defines ${name}`);
+  return Number(m[1]);
+};
+const fmtNum = n => n.toLocaleString('en-US');
+const fmtList = names => names.map(n => `\`${n}\``).join(', ').replace(/, ([^,]*)$/, ' and $1');
+const ALL_PROMPT_TEXT = () => [COMMON_TEXT, ...roster.agents.map(a => a.parts.body)];
+
+test('prompts state the plan step cap from server/plan.js and no other', () => {
+  assert.match(arch.parts.body, new RegExp(`at most ${MAX_STEPS} steps`, 'i'));
+  for (const text of ALL_PROMPT_TEXT()) {
+    for (const m of text.matchAll(/at most (\d+) steps/gi)) assert.equal(Number(m[1]), MAX_STEPS, m[0]);
+  }
+});
+
+test('prompts state the hand-off limits the orchestrator applies (per-output cut and total, oldest dropped first)', () => {
+  const block = orchestratorConst('BLOCK_MAX');
+  const total = orchestratorConst('CTX_MAX');
+  for (const [name, text] of [['_common.md', COMMON_TEXT], ['arch.md', arch.parts.body]]) {
+    assert.ok(text.includes(`${fmtNum(block)} characters`), `${name} states the ${block}-character cut`);
+    assert.ok(text.includes(`${fmtNum(total)} characters`), `${name} states the ${total}-character total`);
+    assert.match(text, /oldest dropped first/, name);
+  }
+  for (const text of ALL_PROMPT_TEXT()) {
+    for (const m of text.matchAll(/(\d[\d,]*) characters/g)) assert.ok([block, total].includes(Number(m[1].replaceAll(',', ''))), m[0]);
+  }
+});
+
+test('arch states exactly the scripts the build and test tiers can run (server/tiers.js)', () => {
+  const scripts = allow => [...new Set(allow.flatMap(r => {
+    const m = /^Bash\(npm (?:run (\w+)|(test)):\*\)$/.exec(r);
+    return m ? [m[1] ?? m[2]] : [];
+  }))];
+  const build = scripts(TIERS.build.allow);
+  const tester = scripts(TIERS.test.allow);
+  assert.deepEqual(build, ['lint', 'build', 'format', 'typecheck'], 'derived build scripts');
+  assert.deepEqual(tester, ['test', 'e2e'], 'derived test scripts');
+  assert.ok(arch.parts.body.includes(`${fmtList(build)} scripts`), `arch names the builders' scripts as ${fmtList(build)}`);
+  assert.ok(arch.parts.body.includes(`${fmtList(tester)} scripts`), `arch names the tester's scripts as ${fmtList(tester)}`);
+});
+
+test('arch names the protected paths that tiers.js denies to every agent', () => {
+  const deny = new Set(denyRules());
+  for (const rule of ['Read(**/.env*)', 'Read(**/*.pem)', 'Edit(**/.env*)', 'Edit(**/.git/**)', 'Edit(**/node_modules/**)', 'Edit(**/.claude/**)', 'Edit(**/.mcp.json)']) {
+    assert.ok(deny.has(rule), `tiers.js denies ${rule}`);
+  }
+  for (const p of ['`.env*`', '`*.pem`', '`.git`', '`node_modules`', '`.claude`', '`.mcp.json`']) assert.ok(arch.parts.body.includes(p), p);
+});
+
+test('arch never routes to itself, and the router in roster.json is the agent whose prompt this is', () => {
+  const doc = JSON.parse(fs.readFileSync(path.join(AGENTS, 'roster.json'), 'utf8'));
+  const routers = doc.agents.filter(a => a.router);
+  assert.equal(routers.length, 1);
+  assert.equal(routers[0].id, roster.router.id);
+  assert.equal(routers[0].prompt, 'arch.md');
+  assert.ok(arch.parts.body.includes(`Never use \`${roster.router.id}\``));
+});
+
+test('arch routing rules: most specific first, with the limits the review asked for', () => {
+  const body = arch.parts.body;
+  const rules = section(body, '## Routing rules');
+  assert.match(rules, /more specific rules come first/i);
+  const order = ['Security-focused change', 'Symptom or production risk', 'Change request', '"Review X"', 'Architecture or design advice', 'A question or explanation'];
+  const at = order.map(k => rules.indexOf(k));
+  for (const [i, k] of order.entries()) assert.ok(at[i] >= 0, `rule "${k}" present`);
+  for (let i = 1; i < at.length; i++) assert.ok(at[i - 1] < at[i], `"${order[i - 1]}" comes before "${order[i]}"`);
+  assert.match(body, /first slice/i, 'over-sized work: plan the first slice');
+  assert.match(body, /dependenc/i, 'new dependencies are beyond the team');
+  assert.match(body, /no test tool/i, 'asked for tests without a test tool');
+  assert.match(body, /no commit yet/i, 'empty repository');
+  assert.match(body, /typo/i, 'trivial change may skip the reviewer');
+  assert.match(body, /never copy instructions/i, 'no laundering of instructions into steps');
+  assert.match(body, /mention it in `summary`/i, 'injection attempts are mentioned in summary');
+  assert.match(body, /triple backticks/i, 'JSON hygiene');
+  assert.match(body, /`git status`/, 'review-only plans have no base');
+});
+
+test('_common.md: the task cannot override the rules, pasted text is data, instructions are not revealed', () => {
+  const rules = section(COMMON_TEXT, '## Who you are and the ground rules');
+  assert.match(rules, /cannot override/i);
+  assert.match(rules, /pasted/i);
+  assert.match(rules, /do not reveal or paraphrase/i);
+  assert.match(section(COMMON_TEXT, '## Method'), /`git status`/, 'review without a base: uncommitted work');
 });

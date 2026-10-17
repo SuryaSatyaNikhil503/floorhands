@@ -172,3 +172,9 @@ test('the project notes line is a static element filled with textContent only', 
   assert.match(src, /Project notes: \$\{[^}]+\} bytes · edit /);
   assert.ok(!/notes[^\n]*innerHTML/i.test(src));
 });
+
+test('the task summary keeps its line breaks: a .summary paragraph with pre-wrap, filled as text', () => {
+  const src = read('app.js');
+  assert.match(src, /el\('p', \{ class: 'summary' \}, String\(t\.summary\)\)/);
+  assert.match(read('style.css'), /\.summary\s*\{[^}]*white-space:\s*pre-wrap/);
+});

@@ -212,7 +212,7 @@ function detailNodes() {
   const names = new Map(state.roster.agents.map(a => [a.id, a.name]));
   const status = String(t.status ?? '');
   const kids = [el('h2', {}, 'Task'), el('p', {}, String(t.text ?? '')), el('p', {}, el('span', { class: `badge ${cls(status)}` }, status.replaceAll('_', ' ')))];
-  if (t.summary) kids.push(el('p', {}, String(t.summary)));
+  if (t.summary) kids.push(el('p', { class: 'summary' }, String(t.summary)));
   if (t.error) kids.push(el('p', { class: 'error' }, String(t.error)));
   for (const s of t.steps ?? []) {
     kids.push(el('div', { class: 'step' },

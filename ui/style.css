@@ -50,6 +50,7 @@ button:disabled { opacity: .5; cursor: default; }
 .badge.planning, .badge.running { color: var(--warn); }
 .badge.done, .badge.approved { color: var(--ok); }
 .badge.failed { color: var(--danger); }
+.summary { white-space: pre-wrap; overflow-wrap: anywhere; }
 .step { border-top: 1px solid var(--line); padding: 10px 0; }
 .step h3 { font-size: 13px; margin: 0 0 4px; }
 .step .muted { white-space: normal; overflow-wrap: anywhere; margin: 0 0 6px; }
