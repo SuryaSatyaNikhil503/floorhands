@@ -11,7 +11,7 @@
   <img src="docs/images/floor-desktop.png" alt="The floorhands office: nine agents in three pods on the left; on the right a task awaiting approval, with each agent's output, the proposed diff, and the Approve and merge and Reject buttons" width="900">
 </p>
 
-> **Status: early (v0.1.0).** It works end to end on macOS with Claude Code 2.1.296. The agent prompts are first drafts, there are no connectors yet, and the local port has no authentication. Read [Known limits](#known-limits) before pointing it at anything you care about.
+> **Status: early (v0.2.0).** It works end to end on macOS with Claude Code 2.1.296. The agent prompts are version 2 and were evaluated on three small sample projects (see [Evaluation](#evaluation)); there are no connectors yet, and the local port has no authentication. Read [Known limits](#known-limits) before pointing it at anything you care about.
 
 ## What it is
 
@@ -21,6 +21,7 @@ floorhands is a small local server, a browser UI and a CLI that run a team of ni
 
 - A floor plan of the team in your browser that shows who is working and which tool they are using, plus the plan, each agent's output and the diff.
 - Reviews from read-only agents (front end, back end, AWS/DevOps), changes from two builder agents and an SRE, triage from a support engineer, and test runs from an end-to-end tester.
+- Agents that know your project: floorhands detects its stack (languages, frameworks, which scripts exist) and tells every agent, and you can add standing guidance of your own with `floorhands notes` (see [Teach it about your project](#teach-it-about-your-project)).
 - Three permission tiers (read, build, test) defined in one file, [`server/tiers.js`](server/tiers.js), and probed against the real Claude Code CLI.
 - Per-task git worktrees with Approve (`git merge --no-ff`) or Reject (worktree and branch deleted).
 - Build and test commands that run inside Claude Code's Bash sandbox: no network, no writes outside the worktree.
@@ -30,15 +31,17 @@ floorhands is a small local server, a browser UI and a CLI that run a team of ni
 ### How a task flows
 
 1. You send a task from the page, for example *"Review the contact form for security, then add server-side email validation"*.
-2. The **Architect** (read-only) looks at the code and replies with a plan: a short summary and up to six steps, each assigned to one agent. For a plain question it can answer directly with no steps.
-3. The steps run in order. The first build or test step creates a git worktree on a new `floorhands/<task-id>` branch; every later step runs inside it, so a reviewer after a builder sees the builder's changes.
-4. After each builder step, floorhands commits the worktree (after checking it was not tampered with).
-5. If the branch differs from where it started, the task waits for you as **awaiting approval** with the diff. If nothing changed, the worktree is removed and the task is **done**.
-6. **Approve and merge** merges the branch into whatever branch your repository is on, then removes the worktree and branch. **Reject** removes them without merging.
+2. floorhands detects the project's **facts** (languages, frameworks, which scripts exist; see [Teach it about your project](#teach-it-about-your-project)) and reads your **notes** file, once for the task. The facts are stored with the task.
+3. The **Architect** (read-only) gets your task, the team roster, the facts and a few routing hints derived from them (for example "there is no test script: do not schedule the tester"). It looks at the code and replies with a plan: a short summary and up to six steps, each assigned to one agent. For a plain question it can answer directly with no steps.
+4. The steps run in order. The first build or test step creates a git worktree on a new `floorhands/<task-id>` branch; every later step runs inside it, so a reviewer after a builder sees the builder's changes. A step in a worktree is told the commit the branch started at and the git commands that show the change under review. Each step also receives the earlier agents' output as data, cut to the first 2,000 characters per step and at most 6,000 characters in total (oldest dropped first).
+5. After each builder step, floorhands commits the worktree (after checking it was not tampered with).
+6. If the branch differs from where it started, the task waits for you as **awaiting approval** with the diff. If nothing changed, the worktree is removed and the task is **done**.
+7. **Approve and merge** merges the branch into whatever branch your repository is on, then removes the worktree and branch. **Reject** removes them without merging.
 
 ```mermaid
 flowchart LR
-    T([Your task]) --> A[Architect<br/>read-only plan]
+    T([Your task]) --> F[Project facts<br/>and your notes]
+    F --> A[Architect<br/>read-only plan]
     A --> R{Steps<br/>up to 6}
     R -->|review, triage| RO[Read-tier agents]
     R -->|build, test| WT["Git worktree<br/>branch floorhands/task-id"]
@@ -73,64 +76,245 @@ To ask for permission, open an issue titled **"Permission request"**: [new permi
 | **OS** | macOS (tested). Linux is untested; its Bash sandbox needs `bubblewrap` and `socat`. Windows is not supported. |
 | **Node** | 22 or newer (developed on 24). |
 | **git** | Each project must be a git repository with at least one commit for build and test steps. |
-| **Claude Code** | The `claude` CLI installed and logged in (run `claude` once and sign in). Verified with 2.1.296. |
+| **Claude Code** | The `claude` CLI installed and logged in (run `claude` once and sign in). Verified with 2.1.296. The plugin is optional. |
 | **npm** | Only if you want builders and the tester to run your project's scripts (see the [FAQ](#faq)). |
 
-## Install
+## Install in Claude Code
 
-Clone it for your own use. The commands below use `~/Projects/floorhands`, which is also the path the plugin skill suggests when the command is missing.
+You can run floorhands from any terminal. The Claude Code plugin is an optional extra that lets you start it from inside a Claude Code session. Everything the plugin does, the plain `floorhands` command does too.
+
+### 1. Check the prerequisites
+
+```bash
+node --version      # v22.0.0 or newer
+git --version       # any recent git
+claude --version    # Claude Code; tested with 2.1.296
+```
+
+You also need to be signed in to Claude Code: run `claude` once in a terminal, sign in when it asks, then quit. floorhands runs your own `claude` under your own login, so if `claude` works for you, floorhands can use it. macOS is the tested platform (see [Requirements](#requirements)).
+
+### 2. Get the code and put `floorhands` on your PATH
 
 ```bash
 git clone https://github.com/SuryaSatyaNikhil503/floorhands.git ~/Projects/floorhands
 ~/Projects/floorhands/scripts/install.sh
 ```
 
-`scripts/install.sh` makes the scripts executable and links `~/.local/bin/floorhands` to `bin/floorhands`. It tells you if `~/.local/bin` is not on your `PATH`; if so, add it to your shell profile.
+`scripts/install.sh` does three things: it makes the scripts executable, creates `~/.local/bin` if needed, and links `~/.local/bin/floorhands` to `bin/floorhands`. It then prints the two plugin commands from step 3. It does **not** use `sudo`, edit your shell profile, touch your Claude Code configuration, use the network or install packages. You can run it again safely.
 
-**Claude Code plugin (optional).** It adds the `/floorhands:floorhands` skill and the opt-in SessionStart hook:
+If it says `~/.local/bin is not on your PATH`, add it yourself and open a new terminal. For zsh, the macOS default:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+Check with `command -v floorhands`. Keep the clone where it is: the link points into it.
+
+### 3. Install the Claude Code plugin (optional)
+
+The plugin adds one skill, listed as `floorhands:floorhands`, and an opt-in hook that starts the office when a Claude Code session opens in a project you enabled. There are two ways to use it.
+
+**A. Permanent: add the clone as a marketplace and install from it.** Run these in a terminal:
 
 ```bash
 claude plugin marketplace add ~/Projects/floorhands
 claude plugin install floorhands@floorhands
+claude plugin list          # floorhands@floorhands should show "Status: ✔ enabled"
 ```
 
-To try the plugin for one session without installing it: `claude --plugin-dir ~/Projects/floorhands/claude-plugin`.
+The first command registers your clone as a marketplace named `floorhands` (in your user settings, so it applies to every project); the second installs the plugin from it. Claude Code reads the plugin straight from `claude-plugin/` in your clone, so do not move or delete the clone. To update, run `git pull` in the clone and start a new Claude Code session (or run `/reload-plugins` in one); `claude plugin update floorhands@floorhands` exists but reports "nothing to update" for a plugin read from a folder.
 
-> These steps change your `PATH` and your Claude Code configuration, so you run them yourself. The manifests pass `claude plugin validate`; the marketplace install itself has not been exercised in testing.
+Manage it later with:
 
-## Quick start
+| To | Run |
+|---|---|
+| Turn it off, keep it installed | `claude plugin disable floorhands@floorhands` |
+| Turn it back on | `claude plugin enable floorhands@floorhands` |
+| Remove it | `claude plugin uninstall floorhands@floorhands` |
+| Remove the marketplace entry too | `claude plugin marketplace remove floorhands` |
+
+`install` and `uninstall` take `--scope user|project|local`; the default is `user`.
+
+**B. Try it for one session without installing anything:**
 
 ```bash
-cd ~/code/my-app            # any git repository with at least one commit
-floorhands start            # prints: floorhands → http://localhost:4600  (project: /…/my-app)
+claude --plugin-dir ~/Projects/floorhands/claude-plugin
 ```
 
-1. **Start it from inside the repository you want to work on.** One server runs per repository. Its state goes in `my-app/.floorhands/`, which floorhands hides from git through `.git/info/exclude`.
-2. **Open the URL** it printed, or run `floorhands open` to start it and open your browser.
-3. **Send a task.** For example:
-   > Review src/routes/contact.js for input validation and injection problems, then add server-side validation for the email and message fields and make the lint script pass.
+The plugin is loaded for that session only.
 
-   The Architect plans it (for this one, typically: back-end reviewer, back-end engineer, then a reviewer again) and each agent lights up on the floor while it works. Select the task, then click an agent to see its recent activity on that task.
-4. **Review the diff.** When the task shows *awaiting approval*, read every step's output and the full diff in the task panel.
-5. **Approve and merge** (a `--no-ff` merge into your current branch, with your git identity if one is configured) or **Reject**. Run `floorhands stop` when you are done.
+**What was verified, and what was not.** Both manifests pass `claude plugin validate`. The commands above were run end to end on Claude Code 2.1.296 on macOS in a throwaway Claude Code configuration (add, install, list, disable, enable, update, uninstall, remove), and in both ways (A and B) the skill list of a `claude -p` session contained `floorhands:floorhands`. Not verified: using the skill and the SessionStart hook interactively inside a live session, and the Claude desktop app and the IDE extensions. The plugin commands are terminal commands. Plugins live in your Claude Code user configuration, so the app and the extensions may well pick it up, but that was not tested; if they do not, use the plain `floorhands` command. The hook finds the CLI next to the plugin, at `~/.local/bin/floorhands`, or at the path in `FLOORHANDS_BIN`; the skill runs `floorhands` through Claude's Bash tool, so the command must be on that tool's `PATH` (see [Troubleshooting](#troubleshooting)).
 
-Set the project up yourself before the first build task: dependencies installed, and the scripts you want used (`lint`, `build`, `test`, …) defined in `package.json`. Agents cannot run `npm install` or `npx`, and cannot scaffold a project.
+### 4. Check that it works
+
+```bash
+floorhands help             # lists start, open, status, stop, enable, disable, notes
+cd ~/code/my-app            # any git repository
+floorhands status           # "not running", the project path, "auto-start: off"
+```
+
+In Claude Code, start a session in that repository (`claude`). The plugin's skill is listed as `floorhands:floorhands`, and you invoke it with that full name:
+
+```text
+/floorhands:floorhands start
+```
+
+The bare `/floorhands` form is not verified, so this guide does not use it. The skill's description also says to use it when you ask in plain words, for example "start floorhands", so the model can invoke it that way too; this has not been watched in a live session, so the full slash form above is the one to rely on.
+
+## Using floorhands
+
+### A first run, from zero
+
+1. **Pick a repository.** One you cloned yourself (see [Known limits](#known-limits)), with at least one commit (`git log -1` prints it). For build and test steps, install its dependencies yourself and define the scripts you want used (`lint`, `build`, `test`, …) in `package.json`: agents cannot run `npm install` or `npx`, and cannot scaffold a project. Read-only tasks need none of this.
+2. **Start it** from inside the repository:
+   ```bash
+   cd ~/code/my-app
+   floorhands start        # floorhands → http://localhost:4600  (project: /…/my-app)
+   ```
+   or, in a Claude Code session in that repository, `/floorhands:floorhands start`. `floorhands open` also opens the page in your browser. One server runs per repository; its state goes in `my-app/.floorhands/`, which floorhands hides from git through `.git/info/exclude`.
+3. **Open the URL.** The page shows the office floor on the left: nine agents in three pods, lit up while they work. On the right is the task box (*Give the team a task*), a muted line under it about your project notes (*Project notes: none · create …* or *Project notes: N bytes · edit …*), the task list, and the selected task's panel.
+4. **Send a first task.** Be specific about the area and the outcome (see [Tips for good tasks](#tips-for-good-tasks)). Three to start with:
+   - **A review (changes nothing):**
+     > Review src/routes/contact.js for input validation and injection problems. Report findings only; do not change anything.
+   - **A small change with tests:**
+     > In src/routes/orders.js, make GET /api/orders accept optional limit and offset query parameters (limit 1 to 100, default 20; anything else returns 400). Add test cases next to the existing orders tests. Done when the lint and test scripts pass.
+   - **A "what could go wrong" triage:**
+     > We plan to ship the checkout flow on Friday. What could go wrong in production? Look at error handling, timeouts, retries and what happens when the payment provider is slow.
+5. **Read the plan and each agent's output.** Select the task. You see the Architect's summary and its steps, each as *agent — status* with the instruction it was given and, when done, its output. Every report starts with a `VERDICT:` line and ends with *What I checked* and *What I did not check*. Click an agent on the floor to see its recent activity (tool calls and text) for that task.
+6. **Review the diff.** If agents changed files, the task waits as *awaiting approval* and the panel shows **Proposed changes**: the full diff of the task branch against where it started. Read it.
+7. **Decide.** **Approve and merge** merges the branch into the branch your repository is on, with `git merge --no-ff`, and removes the worktree and branch. **Reject** removes them without merging. If the merge cannot apply cleanly, nothing changes and the branch is kept (see [Troubleshooting](#troubleshooting)). A review or triage task has no diff and ends as *done*.
+8. **Stop it** when you are finished: `floorhands stop`.
+
+**What the statuses mean**
+
+| Status | Meaning |
+|---|---|
+| `queued` | The task was created and has not started yet (an instant). |
+| `planning` | The Architect is reading the code and writing the plan. |
+| `running` | The plan's steps are running, one after another. Each step is `pending`, `running`, `done` or `failed`. |
+| `awaiting approval` | At least one step changed the code. Nothing has reached your branch; the diff is waiting for you. |
+| `done` | Finished, with nothing to approve: a review, a question, or a build that changed nothing. |
+| `failed` | A step or the plan failed, or the server restarted mid-task. The error is shown in the panel. Work the builders had committed is discarded (see [Known limits](#known-limits)). |
+| `approved` | You pressed Approve and the merge succeeded. |
+| `rejected` | You pressed Reject; the worktree and branch are gone. |
+
+**Where things live.** The plan and every step's output are in the task panel, and on disk in `.floorhands/tasks/<task-id>.json` in the project (task text, plan, outputs, the project facts the agents were given, and the last 500 events). While a task awaits approval, its changes are in the worktree `~/.floorhands/worktrees/<project-hash>/<task-id>` on the branch `floorhands/<task-id>`. Your own working copy is untouched until you press Approve. Do not put secrets in task text: it is stored in `.floorhands/`.
+
+### Teach it about your project
+
+floorhands tells every agent two kinds of things about your project.
+
+**Project facts: detected automatically, nothing to do.** At the start of each task floorhands looks at the repository's file list and manifests (it reads them as data and never runs them) and records only labels from a fixed list:
+
+- languages, the five most common (javascript, typescript, java, kotlin, python, go, ruby, php, csharp, rust, hcl, shell);
+- frameworks and libraries, test tools, infrastructure and CI systems (the full list is below);
+- the package manager (npm, pnpm, yarn, bun, or none);
+- which of the six scripts `lint`, `build`, `format`, `typecheck`, `test` and `e2e` exist in the **root** `package.json` (script names only);
+- the monorepo kind (workspaces, pnpm, turbo, nx) and the number of packages (at most 50);
+- whether the folder is a git repository, and how many files were listed.
+
+It **never copies repository text**: no project name, description, script command, path, version, dependency name or file content ever reaches an agent through the facts, only the fixed labels and numbers. Symlinks are not followed and file sizes and counts are capped. The exact text the agents were given is saved as `facts` in the task's JSON file. A project that is not npm-based (Python or Java, say) is detected, but it shows no scripts, and agents are told that nothing can be run.
+
+<details>
+<summary>The fixed list of labels</summary>
+
+- **Frameworks and libraries:** react, next, vite, vue, nuxt, svelte, angular, express, nestjs, fastify, koa, tailwind, redux, prisma, typeorm, sequelize, mongoose, spring-boot, spring-security, quarkus, micronaut, hibernate, fastapi, django, flask, sqlalchemy, pydantic, celery, rails, laravel.
+- **Test tools:** jest, vitest, playwright, cypress, mocha, testing-library, junit, pytest.
+- **Infrastructure:** terraform, cdk, cloudformation, serverless, docker, kubernetes, helm.
+- **CI:** github-actions, gitlab-ci, jenkins, circleci.
+</details>
+
+**Owner notes: standing guidance you write.** Anything the tool cannot know: conventions, regional data-protection rules, accessibility level, SEO, how your authentication works. `floorhands notes` prints where the file lives and what is in it:
+
+```text
+$ floorhands notes
+notes file: <your home>/.floorhands/projects/d7582833ca/notes.md
+(no notes yet — create the file above with your editor)
+```
+
+`floorhands notes` only reads: it creates neither the file nor its folder. To create and edit the file:
+
+```bash
+cd ~/code/my-app
+NOTES=$(floorhands notes | sed -n '1s/^notes file: //p')
+mkdir -p "$(dirname "$NOTES")"
+${EDITOR:-nano} "$NOTES"
+```
+
+- **Where:** `<FLOORHANDS_HOME or ~/.floorhands>/projects/<project-hash>/notes.md`, **outside** your repository on purpose, because the repository is untrusted and must not be able to plant instructions. The hash comes from the project's absolute path, so a moved or re-cloned project starts with empty notes.
+- **Size:** at most 4 KB. Anything beyond that is cut, with a note to the agents. Control characters are removed. A symlink is ignored; the file must be a regular file.
+- **Effect:** every agent sees the notes as the owner's standing guidance, in every task you send afterwards (a task already running keeps what it started with). They shape what agents look for and how they write; they can **never** widen what an agent may do. Permissions come only from the tier, enforced by the `claude` command line, so no note can allow a command, a path or the network.
+- **Visibility:** the page shows one line about the notes (path and size). The API reports the path and size, never the contents.
+- **No secrets in notes:** see the process-list limit under [Known limits](#known-limits).
+
+Example notes for a web app:
+
+```markdown
+# Notes
+- Public marketing site plus a customer dashboard. Next.js, TypeScript, Tailwind.
+- Conventions: named exports only; all data fetching goes through lib/api; user-facing text lives in lib/messages.
+- Our users are in the EU and UK: no analytics or marketing scripts before cookie consent; any new form that collects personal data needs a stated purpose and retention period.
+- Accessibility target is WCAG 2.2 AA: flag missing labels, focus handling and low contrast.
+- SEO matters for the public marketing pages only: unique title and description, one h1, canonical URLs.
+```
+
+Example notes for an API service:
+
+```markdown
+# Notes
+- REST API in Python (FastAPI) on PostgreSQL. Multi-tenant: every table has tenant_id and every query must filter by the caller's tenant.
+- Auth: short-lived JWTs from our identity provider; roles are admin, member and viewer. Roles are checked in the dependency, not in handlers.
+- PII: names, emails and phone numbers. Never log them; treat any new response field that exposes PII as High risk.
+- Errors use the problem-details shape in app/errors.py.
+```
+
+### Using it from Claude Code, day to day
+
+With the plugin installed, the skill takes one word after its name:
+
+| You type | It runs |
+|---|---|
+| `/floorhands:floorhands start` | `floorhands start`, then shows you the URL |
+| `/floorhands:floorhands status` | `floorhands status` |
+| `/floorhands:floorhands stop` | `floorhands stop` |
+| `/floorhands:floorhands on` | `floorhands enable`: turn auto-start on for this project |
+| `/floorhands:floorhands off` | `floorhands disable`: turn auto-start off |
+
+Run them from a session in the project. Asking in plain words ("start floorhands", "open the office") should work too, and if you ask the skill to open the page for you it runs `floorhands open`.
+
+**Auto-start is opt-in and per project.** After `on` (or `floorhands enable` in a terminal), the plugin's SessionStart hook runs each time a Claude Code session opens in that project: it starts the office if it is not running and prints one line, the URL. In a project where you did not enable it, the hook does nothing. The hook never blocks or breaks a session: it swallows its own errors and gives up after 15 seconds. If it prints an error about `node`, see [Troubleshooting](#troubleshooting).
+
+**Several projects at once.** Each repository gets its own server: ports start at 4600 and go upward (`FLOORHANDS_PORT` changes the first one). Run `floorhands status` inside a project to see its port.
+
+**Monorepos and folders with several repositories.** The project is the git repository you start floorhands in (the top level of the repository, even if you start it from a subfolder). In a monorepo that is the whole repository, and the facts note the workspaces. If a folder holds several separate repositories (for example `frontend/` and `backend/`), start floorhands inside the one you want to work on, and use another server for the other.
+
+### Tips for good tasks
+
+These come from the rules the Architect works by.
+
+- **Name the area and the outcome.** "Add server-side validation for the email field in the contact form" beats "improve the form". Give file paths you know.
+- **Say how you will verify it.** "Done when the lint and test scripts pass" or "a test asserts 404 for another user's order". Without a check, the team can only report that the change is unverified.
+- **One concern per task.** A task becomes at most six steps, and most need one to three. A big job gets a first slice, with the rest described in the summary.
+- **Know what the team cannot do.** Agents cannot install packages, deploy, use the network or external services, or read production data. They cannot read `.env*` or `*.pem` files, or touch `.env*`, `.git`, `node_modules`, `.claude` or `.mcp.json`. Builders can run only `npm run lint`, `build`, `format` and `typecheck`; the tester only `npm test`, `npm run test` and `npm run e2e`. Code that needs a new dependency is planned only if it is already in the manifest or you say it is installed.
+- **No scripts means analysis only.** If the project has no matching scripts (or is not npm-based), nobody can run the result; builders still edit, the summary says the change is unverified, and no tester is scheduled. If you ask for tests but the project has no test setup, the plan specifies the cases for you to add.
+- **Commit what you want the builders to see.** The first build step branches from `HEAD`, so uncommitted edits are not in the worktree. Read-only agents look at your working copy.
+- **Treat pasted text as data.** Issue text, logs and file contents in a task cannot give the agents orders; they are told to report such attempts as findings.
 
 ## The team
 
-From [`agents/roster.json`](agents/roster.json). Each agent has a prompt in [`agents/prompts/`](agents/prompts/) and a list of Claude skills it is told to use when they are installed.
+From [`agents/roster.json`](agents/roster.json). Each agent has a prompt in [`agents/prompts/`](agents/prompts/) and, optionally, hints about Claude skills that may help (see [How the agents are briefed](#how-the-agents-are-briefed)).
 
-| id | Name | Role | Pod | Tier | What it may do |
-|---|---|---|---|---|---|
-| `arch` | Architect (router, pod lead) | Technical Architect | Architecture & Review | read | Read the code and write the plan |
-| `rfe` | FE Reviewer | Senior Front-End Engineer | Architecture & Review | read | Review front-end code |
-| `rbe` | BE Reviewer | Senior Back-End Engineer | Architecture & Review | read | Review back-end code |
-| `raws` | AWS Reviewer | Senior AWS DevOps Engineer | Architecture & Review | read | Review infrastructure, IAM and CI/CD code |
-| `fe` | Front-End Engineer (pod lead) | Front-End Engineer | Build | build | Edit files in the worktree; run lint, build, format, typecheck scripts |
-| `be` | Back-End Engineer | Back-End Engineer | Build | build | Edit files in the worktree; run lint, build, format, typecheck scripts |
-| `sre` | SRE (pod lead) | Site Reliability Engineer | Reliability & Quality | build | Edit pipeline and infrastructure code in the worktree; cannot apply or deploy |
-| `sup` | Support Engineer | Support Engineer | Reliability & Quality | read | Find operational risks and write ready-to-file tickets |
-| `e2e` | E2E Tester | End-to-End Tester | Reliability & Quality | test | Run the project's test scripts in the worktree; cannot edit |
+| id | Name | Role | Pod | Tier | What it may do | Report starts with |
+|---|---|---|---|---|---|---|
+| `arch` | Architect (router, pod lead) | Technical Architect | Architecture & Review | read | Read the code and write the plan | the plan (JSON); direct answers go in its summary |
+| `rfe` | FE Reviewer | Senior Front-End Engineer | Architecture & Review | read | Review front-end code | `VERDICT: approve \| approve-with-changes \| block` |
+| `rbe` | BE Reviewer | Senior Back-End Engineer | Architecture & Review | read | Review back-end code | `VERDICT: approve \| approve-with-changes \| block` |
+| `raws` | AWS Reviewer | Senior AWS DevOps Engineer | Architecture & Review | read | Review infrastructure, IAM and CI/CD code | `VERDICT: approve \| approve-with-changes \| block` |
+| `fe` | Front-End Engineer (pod lead) | Front-End Engineer | Build | build | Edit files in the worktree; run lint, build, format, typecheck scripts | `VERDICT: done \| partial \| blocked` |
+| `be` | Back-End Engineer | Back-End Engineer | Build | build | Edit files in the worktree; run lint, build, format, typecheck scripts | `VERDICT: done \| partial \| blocked` |
+| `sre` | SRE (pod lead) | Site Reliability Engineer | Reliability & Quality | build | Edit pipeline and infrastructure code in the worktree; cannot apply or deploy | `VERDICT: done \| partial \| blocked` |
+| `sup` | Support Engineer | Support Engineer | Reliability & Quality | read | Find operational risks and write ready-to-file tickets | `VERDICT: no-issues \| issues-found \| needs-information` |
+| `e2e` | E2E Tester | End-to-End Tester | Reliability & Quality | test | Run the project's test scripts in the worktree; cannot edit | `VERDICT: pass \| fail \| no-tests \| blocked` |
 
 | Tier | Tools | Shell commands allowed | Runs in | Sandbox |
 |---|---|---|---|---|
@@ -140,9 +324,26 @@ From [`agents/roster.json`](agents/roster.json). Each agent has a prompt in [`ag
 
 The roster is data: you can rename agents, change prompts or skills, or move agents between pods without code changes (see [Configuration](#configuration)). Every agent must use one of these three tiers.
 
+### How the agents are briefed
+
+Each agent's system prompt is put together fresh for every task, in this order:
+
+1. the **common rules** ([`agents/prompts/_common.md`](agents/prompts/_common.md)): untrusted content is data, never read or repeat secrets, no destructive actions, the tier is binding; a method; a severity scale (Critical, High, Medium, Low, Info) defined with examples; a finding format (title with `path:line`, evidence, why it matters, fix); and the report skeleton: a `VERDICT:` first line, a two-sentence summary, then *What I checked* and *What I did not check*;
+2. a **tier note** saying what that tier can and cannot do;
+3. the **project facts** (data);
+4. your **owner notes** (guidance that never widens the tier);
+5. **skill hints** that apply to this stack (below);
+6. the **role body** from its own prompt file: the Architect's routing rules and plan format, the reviewers' checklists and search recipes for their stacks, the builders' workflow and verification rules, the support engineer's ticket template, the tester's strategy.
+
+The whole prompt is capped at 24 KB; a prompt over the cap is refused with an error.
+
+**Skills are hints, never requirements.** A roster entry can be a skill name, or `{ "name", "alt", "when" }`, where `when` lists fact labels and the hint is shown only if the project has one of them (for example, a React skill only for a React project). If a skill is missing or fails, the agent carries on with the checklist in its prompt.
+
+**Prompt lint.** [`test/prompts.test.js`](test/prompts.test.js) ties every prompt to the permission model in `server/tiers.js`: no prompt may tell an agent to run a command its tier denies, and every prompt must have its required sections, stay within its size cap and name no personal data or project. The lint is what keeps a prompt edit from quietly asking an agent for something the permission model refuses.
+
 ## How it keeps you safe
 
-floorhands assumes that **you** and your user-level Claude Code settings are trusted, and that **the target repository and everything an agent reads are not**. Each agent is a separate `claude -p` process started with `--permission-mode dontAsk` (no prompts; anything not allowed is refused), an explicit tool list, an allow list and a deny list, all built by one function, `buildClaudeArgs` in [`server/tiers.js`](server/tiers.js). The prompt goes to the CLI on stdin, never on the command line, so task text can never be read as a flag.
+floorhands assumes that **you** and your user-level Claude Code settings are trusted, and that **the target repository and everything an agent reads are not**. Each agent is a separate `claude -p` process started with `--permission-mode dontAsk` (no prompts; anything not allowed is refused), an explicit tool list, an allow list and a deny list, all built by one function, `buildClaudeArgs` in [`server/tiers.js`](server/tiers.js). The task prompt (your text and the step) goes to the CLI on stdin, never on the command line, so task text can never be read as a flag. The system prompt (the rules, project facts and owner notes) is passed as an argument; see Known limits.
 
 | Layer | What it does |
 |---|---|
@@ -155,6 +356,7 @@ floorhands assumes that **you** and your user-level Claude Code settings are tru
 | **`--setting-sources user`** | Agents load only your user-level Claude settings. The target repository's `.claude/settings.json`, `.claude/settings.local.json`, hooks and skills are ignored. This closed a real bypass found while testing: a hook in an untrusted repository's settings ran outside the sandbox, as you. |
 | **`--strict-mcp-config`** | Agents get no MCP servers: none of your connectors (mail, drive and the like) and nothing from the repository's `.mcp.json`. |
 | **Credential scrubbing** | Agent processes do not inherit `AWS_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, or any variable whose name contains `SECRET`, `PASSWORD`, `PASSWD` or `PRIVATE_KEY`. This is a deny-list (see Known limits). |
+| **Facts and notes** | Project facts contain only labels from a fixed list plus numbers, so repository text cannot reach an agent's prompt through them, and both facts and notes are framed as data or guidance, never as a way to change a tier. Owner notes live outside the repository, so a repository cannot plant instructions in them. |
 | **Local server guards** | Listens on 127.0.0.1 only. Rejects requests whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` (against DNS rebinding), POSTs from another `Origin`, and POSTs that are not `application/json` (so a plain form on another website cannot submit a task). Request bodies are capped at 64 KB, and the UI is served with a strict Content-Security-Policy and loads nothing from other origins. |
 
 ### What has been verified
@@ -166,7 +368,15 @@ The permission model was tested against the **real CLI: Claude Code 2.1.296 on m
 
 Full evidence is in [docs/spike-findings.md](docs/spike-findings.md) and the JSON results next to it.
 
-**Not verified:** Linux (the sandbox there needs bubblewrap and socat and has not been tried); Windows (not supported); other Claude Code versions (re-run the probes after upgrading `claude`); how the CLI expands `~` in the credential rules (the probes used the same rules with a fake home's absolute path); and the plugin in a live Claude Code session. `/floorhands:floorhands` was confirmed in the skill list of a real `claude -p --plugin-dir` session and both manifests pass `claude plugin validate`, but the skill and the SessionStart hook have not been exercised interactively. `scripts/smoke.mjs` (a real review task end to end) has not been run.
+`server/tiers.js` has not changed since 0.1.0, so these results still describe the permission model. The 0.2.0 code (stack detection, notes, prompt assembly) is covered by the test suite, which uses a fake `claude` (`npm test`). How the version 2 prompts behave with the real CLI is the subject of the Evaluation below.
+
+### Evaluation
+
+The version 2 prompts were compared with the original ones on three small sample projects with problems planted in them. The method, the scoring and the results are in [docs/prompt-eval.md](docs/prompt-eval.md). Three small projects say little about your repository; read the numbers as a check on the prompts, not as a promise.
+
+<!-- EVAL-RESULTS: filled in after the evaluation run -->
+
+**Not verified:** Linux (the sandbox there needs bubblewrap and socat and has not been tried); Windows (not supported); other Claude Code versions (re-run the probes after upgrading `claude`); how the CLI expands `~` in the credential rules (the probes used the same rules with a fake home's absolute path); and the plugin in an interactive Claude Code session. `floorhands:floorhands` was confirmed in the skill list of real `claude -p` sessions, with the plugin installed and with `--plugin-dir`, and both manifests pass `claude plugin validate`, but the skill and the SessionStart hook have not been exercised interactively, and the Claude desktop app and IDE extensions were not tested. `scripts/smoke.mjs` (a real review task end to end) has not been run.
 
 ### Known limits
 
@@ -182,8 +392,11 @@ Full evidence is in [docs/spike-findings.md](docs/spike-findings.md) and the JSO
 10. **A failed task discards builder work.** If a step fails after builders committed, the worktree and branch are deleted rather than kept for review.
 11. **Git commands have no timeout.** A merge that waits for input (for example a GPG passphrase prompt) or a hanging hook in your repository blocks that task's Approve until the server restarts.
 12. **No cap on concurrent tasks.** Each task you send starts at once, with its own worktree and agent processes.
-13. **Prompts are first drafts.** They are generic checklists. Several skill names in the roster do not resolve on a typical setup (they depend on which plugins you have installed); agents are told to say so and carry on. A full rewrite is planned.
+13. **Prompts are version 2, not finished.** They were evaluated on three small sample projects only (see [Evaluation](#evaluation)), and real repositories are bigger and messier. Treat findings as leads to check, and an `approve` verdict as "nothing at High or above in what was checked", not as a clean bill of health. Skill hints depend on which plugins you have installed; agents carry on without them.
 14. **No connectors.** Agents see only the repository: no GitHub, cloud account, monitoring or issue tracker yet.
+15. **A hostile `.git/config`.** Only run floorhands on repositories you cloned yourself. An archive or folder that ships its own `.git` directory can carry a git config that makes git run programs. floorhands hardens its own project scan (git runs with every transport, lazy fetching and fsmonitor off, and a `.git` that is not a real directory is not trusted) and the commits it makes in worktrees, but not every git call: finding the project root, creating worktrees, the read-tier agents' git commands (limit 4) and the merge when you press Approve use the repository's config as it is.
+16. **The system prompt is visible in the process list.** It is passed on the `claude` command line, so your owner notes and the project facts can be read by other users on the same machine while an agent runs (for example with `ps`). Keep secrets and anything private out of your notes.
+17. **Project facts are shallow.** Scripts are read only from the root `package.json`; a stack outside the fixed list of labels is not named. Detection reads a bounded number of files, so a very large repository may show an incomplete picture. Agents are told the facts are hints and can read the code themselves.
 
 ## CLI and skill reference
 
@@ -194,7 +407,10 @@ Full evidence is in [docs/spike-findings.md](docs/spike-findings.md) and the JSO
 | `floorhands status` | Print whether it is running and on which port, the project root, and whether auto-start is on. |
 | `floorhands stop` | Stop this project's server. A stale record is removed. |
 | `floorhands enable` / `disable` | Turn auto-start on or off for this project (creates or removes `.floorhands/enabled`). |
-| `floorhands help` | Print the command list. An unknown command, flag or extra argument exits with code 2 and prints it too. |
+| `floorhands notes` | Print the path of this project's owner-notes file and its contents. Creates nothing. See [Teach it about your project](#teach-it-about-your-project). |
+| `floorhands help` | Print the command list (also `--help` and `-h`). |
+
+Exit codes: `0` on success (including "not running"); `1` if the server could not be started; `2` for an unknown command, an unknown flag or an extra argument, which also prints the command list.
 
 `floorhands start --if-enabled` is for the SessionStart hook: it starts the server only if the project is enabled. `start` and the hook do nothing inside a floorhands agent (`FLOORHANDS_AGENT=1`), so an agent never starts another server.
 
@@ -208,14 +424,14 @@ Full evidence is in [docs/spike-findings.md](docs/spike-findings.md) and the JSO
 | `/floorhands:floorhands on` | `floorhands enable` |
 | `/floorhands:floorhands off` | `floorhands disable` |
 
-The skill runs the `floorhands` command through Claude's Bash tool, so the command must be on your `PATH` (run `scripts/install.sh`). After `floorhands enable` in a project, the plugin's SessionStart hook starts the office whenever a Claude Code session opens there and prints the URL.
+The skill runs the `floorhands` command through Claude's Bash tool, so the command must be on that tool's `PATH` (run `scripts/install.sh`). After `floorhands enable` in a project, the plugin's SessionStart hook starts the office whenever a Claude Code session opens there and prints the URL. Install steps and day-to-day use are in [Install in Claude Code](#install-in-claude-code) and [Using floorhands](#using-floorhands).
 
 ## Configuration
 
 | Variable | Default | Effect |
 |---|---|---|
 | `FLOORHANDS_PORT` | `4600` | First port to try. If it is busy, the next free one is used (up to 19 more). |
-| `FLOORHANDS_HOME` | `~/.floorhands` | Where worktrees go: `<home>/worktrees/<project-hash>/<task-id>`. |
+| `FLOORHANDS_HOME` | `~/.floorhands` | Where floorhands keeps its own files outside your repositories: worktrees (`<home>/worktrees/<project-hash>/<task-id>`) and owner notes (`<home>/projects/<project-hash>/notes.md`). |
 | `FLOORHANDS_CLAUDE_BIN` | `claude` | The CLI to run for each agent turn. `scripts/fake-claude.mjs` is a stand-in for demos and tests. |
 | `FLOORHANDS_LOCK_WAIT_MS` | `5000` | How long a starting server waits for the server holding this project's lock to answer before treating the lock as stale. |
 | `FLOORHANDS_BIN` | (unset) | For the SessionStart hook only: the path to `bin/floorhands` when it is neither at `~/.local/bin/floorhands` nor next to the plugin. |
@@ -224,10 +440,11 @@ Set these in the environment of `floorhands start`; the server inherits them. Ag
 
 **Where things live**
 
-- `<project>/.floorhands/`: `tasks/` (one JSON file per task: text, plan, each step's output, and the last 500 events), `server.json` (pid and port), `server.lock`, `server.log`, and `enabled` when auto-start is on. It is listed in `.git/info/exclude`, so it is never committed.
+- `<project>/.floorhands/`: `tasks/` (one JSON file per task: text, plan, each step's output, the project facts the agents were given, and the last 500 events), `server.json` (pid and port), `server.lock`, `server.log`, and `enabled` when auto-start is on. It is listed in `.git/info/exclude`, so it is never committed.
 - `~/.floorhands/worktrees/` (or `$FLOORHANDS_HOME/worktrees/`): one folder per project, one worktree per task.
+- `~/.floorhands/projects/<project-hash>/notes.md` (or under `$FLOORHANDS_HOME/projects/`): your owner notes for that project. `floorhands notes` prints the exact path.
 
-**Customising the team (locally).** Edit [`agents/roster.json`](agents/roster.json) and the prompts in [`agents/prompts/`](agents/prompts/), then restart with `floorhands stop && floorhands start`. Each agent needs `id`, `name`, `role`, `pod`, `tier` (`read`, `build` or `test`) and `prompt` (a plain `.md` file name); each pod needs exactly one `lead`, and exactly one agent must be the `router` (the planner). An invalid roster stops the server from starting, with the reason in `.floorhands/server.log`. `_common.md` is put in front of every prompt, with `{{name}}` and `{{role}}` filled in. Permissions are not configurable per agent: they come from the tier.
+**Customising the team (locally).** Edit [`agents/roster.json`](agents/roster.json) and the prompts in [`agents/prompts/`](agents/prompts/), then restart with `floorhands stop && floorhands start`. Each agent needs `id`, `name`, `role`, `pod`, `tier` (`read`, `build` or `test`) and `prompt` (a plain `.md` file name); each pod needs exactly one `lead`, and exactly one agent must be the `router` (the planner). An invalid roster stops the server from starting, with the reason in `.floorhands/server.log`. `_common.md` is put in front of every prompt, with `{{name}}` and `{{role}}` filled in. The optional `skills` list takes names, or `{ "name", "alt", "when" }` objects whose `when` lists fact labels from the [fixed list](#teach-it-about-your-project); an unknown label makes the roster invalid. Permissions are not configurable per agent: they come from the tier. Test any prompt change with `npm test`: the prompt lint fails if a prompt tells an agent to run something its tier denies.
 
 ## Troubleshooting
 
@@ -271,6 +488,18 @@ floorhands moves to the next free port and prints it. To choose one: `FLOORHANDS
 <summary><strong>"floorhands did not start", or it reports running but the page does not load</strong></summary>
 
 Read `.floorhands/server.log` in the project. `floorhands stop` removes a stale record. A lock left by a dead process is cleared on the next start; if one is still in the way, check that no floorhands server is running for that project (`floorhands status`), then delete `.floorhands/server.json` and `.floorhands/server.lock`.
+</details>
+
+<details>
+<summary><strong>The skill does not show up in Claude Code</strong></summary>
+
+Run `claude plugin list` in a terminal: `floorhands@floorhands` should be listed as enabled (`claude plugin enable floorhands@floorhands` if it is disabled). Then start a new Claude Code session, or run `/reload-plugins` in the one you have. The skill's full name is `floorhands:floorhands`. If the plugin is listed but the folder it was read from is gone, you moved or deleted the clone: remove the plugin and marketplace (see [Install in Claude Code](#install-in-claude-code)) and add them again from the new path.
+</details>
+
+<details>
+<summary><strong>My notes are not being used</strong></summary>
+
+Run `floorhands notes` from inside the project: it must print your text. If it says "no notes yet", the file is at a different path (the folder name comes from the project's absolute path, so a moved or re-cloned project has a different one), the file is a symlink (ignored; use a regular file), or `FLOORHANDS_HOME` is set differently from when you created it. Notes are read when a task starts, so edit them before you send the task. The page's "Project notes" line shows the size floorhands sees.
 </details>
 
 <details>
@@ -330,20 +559,20 @@ floorhands has no fee; agent turns count against your Claude plan or API usage l
 <details>
 <summary><strong>Which languages and stacks does it work with?</strong></summary>
 
-Reviews, plans, triage and file edits work on any git repository in any language. Running things is npm-only today: builders can run only `npm run lint|build|format|typecheck`, and the tester only `npm test`, `npm run test` or `npm run e2e`. In a project without npm scripts, builders can still edit files, but no agent can build or test the result. A `package.json` whose scripts call your own tools might work, but that has not been tested. Stack-aware prompts are on the roadmap.
+Reviews, plans, triage and file edits work on any git repository in any language. floorhands detects a fixed list of languages, frameworks, test tools, infrastructure and CI systems (see [Teach it about your project](#teach-it-about-your-project)), and the reviewers have checklists for web front ends, back ends and AWS-style infrastructure. Running things is npm-only today: builders can run only `npm run lint|build|format|typecheck`, and the tester only `npm test`, `npm run test` or `npm run e2e`. In a project without those npm scripts (a Python or Java project, say), builders can still edit files, but no agent can build or test the result, and the plan says the change is unverified. A `package.json` whose scripts call your own tools might work, but that has not been tested.
 </details>
 
 ## Roadmap
 
 In rough order:
 
-1. Rewrite the agent prompts to be stack-aware.
-2. Project profiles: optional checks per project (for example regional data-protection rules or SEO).
-3. A per-run auth token for the local server.
-4. Connectors: GitHub, AWS (read-only), an issue tracker.
-5. Verify the sandbox and the probes on Linux.
-6. Kill the whole process group on stop and on timeout, and clean up interrupted tasks' worktrees on restart.
-7. Environment scrubbing as an allow-list instead of a deny-list.
+1. Project profiles: owner notes (free-text guidance per project) shipped in 0.2.0. Still to do: ready-made, reusable profiles, for example for regional data-protection rules or SEO.
+2. A per-run auth token for the local server.
+3. Connectors: GitHub, AWS (read-only), an issue tracker.
+4. Verify the sandbox and the probes on Linux.
+5. Kill the whole process group on stop and on timeout, and clean up interrupted tasks' worktrees on restart.
+6. Environment scrubbing as an allow-list instead of a deny-list.
+7. Harden the remaining git calls against a hostile `.git/config`.
 
 ## Project layout
 
@@ -351,13 +580,19 @@ In rough order:
 bin/floorhands       CLI entry point
 server/              HTTP server, orchestrator, agent runner, worktrees, task store
   tiers.js           the whole permission model
+  stack.js           project facts: fixed-vocabulary detection of the stack
+  notes.js           owner notes, kept outside the repository
+  prompt.js          per-task prompt composition
+  roster.js          roster loading and validation
 ui/                  browser UI (vanilla JS and SVG, no build step)
 agents/              roster.json and one prompt per agent
 claude-plugin/       Claude Code plugin: skill and SessionStart hook
 .claude-plugin/      marketplace manifest for the plugin
 scripts/             install.sh, fake-claude.mjs, the real-CLI probes and the smoke test
-docs/                spike findings, build notes, design docs, screenshots
-test/                node --test suite (fake claude only; no network)
+  eval-prompts.mjs   prompt evaluation harness
+eval/                prompt evaluation: sample projects and expected findings
+docs/                spike findings, build notes, design docs, prompt evaluation, screenshots
+test/                node --test suite (fake claude only; no network), including the prompt lint
 ```
 
 <p align="center">

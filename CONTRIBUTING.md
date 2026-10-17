@@ -38,16 +38,20 @@ These spend real requests on **your own** Claude login. Run them only on your ow
 | Script | What it does |
 |---|---|
 | `node scripts/spike-claude.mjs` | Permission probes: runs the real tier flags from `server/tiers.js` and checks that each forbidden action was attempted and refused. About one short `claude -p` turn per probe. `--list` prints the probes without running anything; `--only <probe>` runs a subset. Results and how to read them: [docs/spike-findings.md](docs/spike-findings.md). |
+| `node scripts/eval-prompts.mjs` | The prompt evaluation: runs the agent prompts on the sample projects in `eval/` and scores the results (see [docs/prompt-eval.md](docs/prompt-eval.md)). Run `node scripts/eval-prompts.mjs --help` first to see its options and how many real requests a run makes. |
 | `node scripts/smoke.mjs` | One real review task end to end. It takes no arguments (it does not parse `--help`; any invocation starts the run). It has not yet been run against the real CLI. |
 
 ## Rules for changes
 
 - **Zero runtime dependencies.** `package.json` has no `dependencies`, and a test checks that. Use Node's standard library.
 - **The safety model lives in `server/tiers.js` and nowhere else.** Any change to it (tools, allow or deny rules, sandbox settings, CLI flags) needs a matching probe in `scripts/spike-claude.mjs` or a test in `test/tiers.test.js`, and the pull request must say honestly what was verified: which probes ran, on which OS and Claude Code version, and what was not run. "It should work" is not verification. A rule the real CLI ignores is worse than no rule, because it looks like protection.
+- **Prompt changes keep the lint green and are measured.** The prompts in `agents/prompts/` and the skill hints in `agents/roster.json` are covered by the prompt lint in `test/prompts.test.js`, which runs in `npm test`: it ties every prompt to the permission model, so a prompt may not tell an agent to run a command its tier denies, and it checks required sections and size caps. A prompt edit that changes what agents do (not a typo or a wording fix) also needs an evaluation summary in the pull request: which sample projects you ran it on, before and after, with the scores from `node scripts/eval-prompts.mjs` (run it with `--help` first). Say honestly what you did not run. A prompt that reads better is not evidence that it works better.
 - **Prefer narrowing.** A change that gives any agent more access (a new command, a new path, network) needs a clear reason in the issue first.
 - **Keep the known limits true.** If your change fixes or creates a limit, update "Known limits" in the README.
 - **No secrets or personal data** in code, tests, fixtures or recorded results. Spike output is redacted for a reason; keep it that way.
 - **Tests use the fake CLI.** New behaviour gets tests under `test/`; nothing in `npm test` may call the real `claude`.
+- **Plugin changes are validated.** If you touch `claude-plugin/` or `.claude-plugin/`, run `claude plugin validate claude-plugin` and `claude plugin validate .` and say so in the pull request. Do not test with `claude plugin install` against your everyday Claude Code configuration; use a throwaway one.
+- **Project facts stay closed.** Anything `server/stack.js` reports is built from its fixed list of labels and numbers; repository text (names, script commands, paths) must never reach an agent through the facts, because the repository is untrusted.
 
 ## Code style
 
@@ -55,12 +59,13 @@ Match the code around you: ES modules, `node:` imports, small functions, no buil
 
 ## Commits and pull requests
 
-- One logical change per commit, with a short imperative subject (`fix(worktree): …`, `docs: …`, `test: …`).
+- One logical change per commit, with a short imperative subject (`fix(worktree): …`, `docs: …`, `test: …`). Commit messages are plain: no co-author trailer is required, and none is added by this project's tooling.
 - Before you open a pull request:
   - [ ] `npm test` passes.
   - [ ] New behaviour has tests.
   - [ ] No new runtime dependencies.
   - [ ] `server/tiers.js` changes come with a probe or test and an honest verification note.
+  - [ ] Prompt changes that alter behaviour come with an evaluation summary (see Rules for changes).
   - [ ] README / CHANGELOG updated where behaviour changed.
   - [ ] The pull request links the issue where the change was agreed.
 

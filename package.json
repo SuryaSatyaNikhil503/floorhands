@@ -1,6 +1,6 @@
 {
   "name": "floorhands",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local office of nine engineering agents, run through your own Claude Code CLI, that review, build and test in isolated git worktrees and hold every change for your approval.",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
