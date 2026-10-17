@@ -15,6 +15,9 @@ const MAX_BODY_BYTES = 9 * 1024;
 const NOTES_BYTES = 4 * 1024;
 
 // Per-role required headings. Tasks 4-6 extend this table (Task 3 only knows the common ones).
+// THE one place to extend: Tasks 4-6 add each role's headings here, keyed by agent id (for example `arch: ['## Plan format']`).
+// Every agent already needs the common ones below. The sections case turns from `todo` into a real test as soon as a body has any
+// required heading (see `todoReason`), so a half-finished rewrite fails instead of hiding behind the flag.
 const COMMON_SECTIONS = ['## Method', '## Report'];
 export const REQUIRED_SECTIONS = { _common: COMMON_SECTIONS };
 const sectionsFor = id => [...COMMON_SECTIONS, ...(REQUIRED_SECTIONS[id] ?? [])];
@@ -113,6 +116,13 @@ export function lintSections(body, required) {
 
 export function lintSize(body) {
   return bytes(body) > MAX_BODY_BYTES ? [`role body is ${bytes(body)} bytes (limit ${MAX_BODY_BYTES})`] : [];
+}
+
+// Self-arming todo: a prompt that has none of its required headings is still the v0.1.0 prose awaiting its rewrite (a TODO). The moment
+// any required heading exists, the rewrite has started and the case is a real test that fails until every required heading is there.
+export function todoReason(agent, required = sectionsFor(agent.id)) {
+  const present = required.length - lintSections(agent.parts.body, required).length;
+  return present === 0 ? 'enabled by the prompt rewrite (Tasks 4-6)' : false;
 }
 
 export function lintAgent(agent, { required = sectionsFor(agent.id) } = {}) {
@@ -230,6 +240,23 @@ test('lintAgent reports every kind of violation in one synthetic prompt', () => 
   for (const re of [/missing required section "## Report"/, /npx audit/, /cat \.env/, /git push/, /edit files/, /home-directory/, /project name/, /email/]) assert.match(p, re);
 });
 
+test('the sections case arms itself: todo while no required heading exists, a real test as soon as one does', () => {
+  const mk = body => ({ id: 'x', name: 'X', tier: 'read', skills: [], parts: { intro: 'You are X.', tierNote: 'Tier: READ-ONLY.', body } });
+  const none = mk('Review the code and report.');
+  assert.equal(typeof todoReason(none), 'string', 'unrewritten prompt: still a todo');
+  // Sections exist but the prompt breaks rules: the case is NOT todo, and the lint reports the failures it would fail the run on.
+  const rewritten = mk('## Method\nRun `npx audit` then `cat .env`; edit the files.\n## Report\nSee /Users/x for Abhudaya.');
+  assert.equal(todoReason(rewritten), false);
+  const problems = lintAgent(rewritten).join('\n');
+  for (const re of [/npx audit/, /cat \.env/, /edit files/, /home-directory/, /project name/]) assert.match(problems, re);
+  // Partly rewritten (only one heading): armed, and the missing one is reported.
+  const partial = mk('## Method\nLook at the code.');
+  assert.equal(todoReason(partial), false);
+  assert.deepEqual(lintSections(partial.parts.body, sectionsFor('x')), ['missing required section "## Report"']);
+  // A role-specific heading added to the table is enforced once the common ones exist.
+  assert.deepEqual(lintSections('## Method\n## Report', [...COMMON_SECTIONS, '## Plan format']), ['missing required section "## Plan format"']);
+});
+
 // ---- limits that hold for the shipped roster today -------------------------------------------------------------------------------
 
 const roster = loadRoster(AGENTS);
@@ -270,10 +297,10 @@ for (const agent of roster.agents) {
   });
 }
 
-// ---- required sections: todo until the prompts are rewritten (Tasks 4-6 remove the flag) -------------------------------------------
+// ---- required sections: todo only while the prompt has none of them (self-arming; see todoReason) -------------------------------------
 
 for (const agent of roster.agents) {
-  test(`${agent.id}: has the required sections`, { todo: 'enabled by the prompt rewrite (Tasks 4-6)' }, () => {
+  test(`${agent.id}: has the required sections`, { todo: todoReason(agent) }, () => {
     assert.deepEqual(lintSections(agent.parts.body, sectionsFor(agent.id)), []);
   });
 }

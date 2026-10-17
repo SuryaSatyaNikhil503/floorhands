@@ -561,11 +561,37 @@ test('planPrompt: no lint, build, format or typecheck script means builders can 
   assert.doesNotMatch(planPrompt('x', roster, factsOf({ commands: { ...none, lint: true } })), /builders can only edit/i);
 });
 
-test('planPrompt: infrastructure with no application framework prefers the AWS reviewer', () => {
-  const infra = factsOf({ frameworks: [], infra: ['terraform'], languages: ['hcl'], tags: ['hcl', 'terraform'] });
-  assert.match(planPrompt('Review', roster, infra), /prefer the AWS reviewer \(raws\)/i);
-  assert.doesNotMatch(planPrompt('Review', roster, factsOf({ infra: ['docker'] })), /AWS reviewer/);
-  assert.doesNotMatch(planPrompt('Review', roster, factsOf({ frameworks: [], infra: [] })), /AWS reviewer/);
+test('planPrompt: AWS-flavoured infrastructure with no application framework prefers the AWS reviewer', () => {
+  const aws = (infra, extra = {}) => factsOf({ frameworks: [], infra, languages: ['hcl'], tags: ['hcl', ...infra], ...extra });
+  const hint = /prefer the AWS reviewer \(raws\)/i;
+  assert.match(planPrompt('Review', roster, aws(['terraform'])), hint);
+  assert.match(planPrompt('Review', roster, aws(['terraform'], { ci: ['github-actions'] })), hint, 'Terraform + GitHub Actions only');
+  assert.match(planPrompt('Review', roster, aws(['cdk'])), hint, 'CDK only');
+  assert.match(planPrompt('Review', roster, aws(['cloudformation'])), hint);
+  assert.match(planPrompt('Review', roster, aws(['serverless'])), hint);
+  assert.match(planPrompt('Review', roster, aws(['docker', 'terraform'])), hint);
+});
+
+test('planPrompt: Docker, Kubernetes, Helm and CI alone never prefer the AWS reviewer', () => {
+  const hint = /AWS reviewer/i;
+  const plain = (languages, over = {}) => factsOf({ languages, frameworks: [], tags: [...languages], ...over });
+  assert.doesNotMatch(planPrompt('x', roster, plain(['python'], { infra: ['docker'], tags: ['python', 'docker'] })), hint, 'Python + Dockerfile');
+  assert.doesNotMatch(planPrompt('x', roster, plain(['javascript'], { infra: ['docker'], tags: ['javascript', 'docker'] })), hint, 'Node + Dockerfile');
+  assert.doesNotMatch(planPrompt('x', roster, plain(['go'], { infra: ['kubernetes', 'helm'] })), hint);
+  assert.doesNotMatch(planPrompt('x', roster, plain(['go'], { ci: ['github-actions', 'gitlab-ci'] })), hint);
+  assert.doesNotMatch(planPrompt('x', roster, plain(['hcl'], { infra: [] })), hint);
+});
+
+test('planPrompt: Terraform alongside an application framework does not prefer the AWS reviewer', () => {
+  assert.doesNotMatch(planPrompt('x', roster, factsOf({ frameworks: ['express'], infra: ['terraform'], languages: ['javascript'] })), /AWS reviewer/i);
+});
+
+test('planPrompt: facts that detected nothing (fileCount 0, for example after a failed scan) give no command-based hints', () => {
+  const nothing = factsOf({ fileCount: 0, hasGit: false, frameworks: [], languages: [], tags: ['no-npm-scripts'], packageManager: 'none', infra: ['terraform'],
+    commands: { lint: false, build: false, format: false, typecheck: false, test: false, e2e: false } });
+  const p = planPrompt('x', roster, nothing);
+  assert.doesNotMatch(p, /no runnable test script|builders can only edit|AWS reviewer|Routing hints/i);
+  assert.match(p, /Project facts/);
 });
 
 test('a planner step turn receives the facts in its prompt through the orchestrator', async () => {

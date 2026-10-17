@@ -116,3 +116,37 @@ test('validateRoster reports malformed skill entries', () => {
   assert.match(bad([{ name: 'a', when: [] }]), /skill entry 0.*when/);
   assert.match(bad(['ok', { name: 'b', when: [7] }]), /skill entry 1.*when/);
 });
+
+test('validateRoster rejects unknown or misspelt keys on a skill object', () => {
+  const bad = skills => { const d = good(); d.agents[0].skills = skills; return validateRoster(d).join(' | '); };
+  assert.match(bad([{ name: 'a', whn: ['react'] }]), /skill entry 0.*unknown key "whn"/);
+  assert.match(bad([{ name: 'a', When: ['react'] }]), /skill entry 0.*unknown key "When"/);
+  assert.match(bad([{ name: 'a', alts: ['b'] }]), /skill entry 0.*unknown key "alts"/);
+  assert.equal(bad([{ name: 'a', alt: ['b'], when: ['react'] }]), '');
+});
+
+test('validateRoster bounds alt (5 entries, 80 characters each) and when (12 tags)', () => {
+  const bad = skills => { const d = good(); d.agents[0].skills = skills; return validateRoster(d).join(' | '); };
+  assert.equal(bad([{ name: 'a', alt: ['1', '2', '3', '4', '5'] }]), '');
+  assert.match(bad([{ name: 'a', alt: ['1', '2', '3', '4', '5', '6'] }]), /skill entry 0.*alt.*at most 5/);
+  assert.equal(bad([{ name: 'a', alt: ['x'.repeat(80)] }]), '');
+  assert.match(bad([{ name: 'a', alt: ['x'.repeat(81)] }]), /skill entry 0.*alt/);
+  assert.match(bad([{ name: 'a', alt: ['bad name'] }]), /skill entry 0.*alt/);
+  const tags = FACT_TAGS.slice(0, 13);
+  assert.equal(bad([{ name: 'a', when: tags.slice(0, 12) }]), '');
+  assert.match(bad([{ name: 'a', when: tags }]), /skill entry 0.*when.*at most 12/);
+});
+
+test('the Architect lists no skill hints (it is read-only and writes no design documents)', () => {
+  const r = loadRoster(AGENTS);
+  assert.deepEqual(r.byId.arch.skills, []);
+  assert.doesNotMatch(r.byId.arch.system, /Optional Claude skills/);
+});
+
+test('design-craft is offered for nuxt as well as the other UI frameworks', () => {
+  const r = loadRoster(AGENTS);
+  for (const id of ['rfe', 'fe']) {
+    const dc = r.byId[id].skills.find(s => s.name === 'anthropic-skills:design-craft');
+    assert.deepEqual([...dc.when].sort(), ['angular', 'next', 'nuxt', 'react', 'svelte', 'vue'], id);
+  }
+});

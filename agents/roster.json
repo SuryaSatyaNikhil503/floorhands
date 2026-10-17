@@ -6,13 +6,11 @@
   ],
   "agents": [
     {"id": "arch", "name": "ARCHITECT", "role": "Technical Architect", "pod": "review", "lead": true, "router": true, "tier": "read", "prompt": "arch.md",
-      "skills": [
-        {"name": "superpowers:brainstorming", "alt": ["brainstorming"]}
-      ] },
+      "skills": [] },
     {"id": "rfe", "name": "FE REVIEWER", "role": "Senior Front-End Engineer", "pod": "review", "tier": "read", "prompt": "rfe.md",
       "skills": [
         {"name": "anthropic-skills:react-typescript-standards", "alt": ["react-typescript-standards"], "when": ["react", "next"]},
-        {"name": "anthropic-skills:design-craft", "alt": ["design-craft"], "when": ["react", "vue", "svelte", "angular", "next"]}
+        {"name": "anthropic-skills:design-craft", "alt": ["design-craft"], "when": ["react", "vue", "nuxt", "svelte", "angular", "next"]}
       ] },
     {"id": "rbe", "name": "BE REVIEWER", "role": "Senior Back-End Engineer", "pod": "review", "tier": "read", "prompt": "rbe.md",
       "skills": [
@@ -26,7 +24,7 @@
     {"id": "fe", "name": "FRONT-END ENGINEER", "role": "Front-End Engineer", "pod": "build", "lead": true, "tier": "build", "prompt": "fe.md",
       "skills": [
         {"name": "anthropic-skills:react-typescript-standards", "alt": ["react-typescript-standards"], "when": ["react", "next"]},
-        {"name": "anthropic-skills:design-craft", "alt": ["design-craft"], "when": ["react", "vue", "svelte", "angular", "next"]}
+        {"name": "anthropic-skills:design-craft", "alt": ["design-craft"], "when": ["react", "vue", "nuxt", "svelte", "angular", "next"]}
       ] },
     {"id": "be", "name": "BACK-END ENGINEER", "role": "Back-End Engineer", "pod": "build", "tier": "build", "prompt": "be.md",
       "skills": [

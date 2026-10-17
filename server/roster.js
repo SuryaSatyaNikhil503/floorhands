@@ -11,6 +11,10 @@ const TIER_NOTES = {
 };
 const PROMPT_FILE = /^[\w.-]+\.md$/;
 const SKILL_NAME = /^[A-Za-z0-9][\w.:-]{0,99}$/;
+const SKILL_ALT = /^[A-Za-z0-9][\w.:-]{0,79}$/;
+const SKILL_KEYS = new Set(['name', 'alt', 'when']);
+const MAX_ALT = 5;
+const MAX_WHEN = 12;
 
 // A skill entry is a name, or { name, alt?: string[], when?: fact tags[] } (a hint shown only when the detected facts have one of the tags).
 function skillProblems(skills) {
@@ -24,10 +28,15 @@ function skillProblems(skills) {
       return;
     }
     if (!e || typeof e !== 'object' || Array.isArray(e)) { problems.push(`${at} must be a name or an object { name, alt?, when? }`); return; }
+    for (const k of Object.keys(e)) if (!SKILL_KEYS.has(k)) problems.push(`${at}: unknown key ${JSON.stringify(k)} (allowed: name, alt, when)`);
     if (typeof e.name !== 'string' || !SKILL_NAME.test(e.name)) problems.push(`${at}: name must be a plain skill name`);
-    if (e.alt !== undefined && !(Array.isArray(e.alt) && e.alt.every(a => typeof a === 'string' && SKILL_NAME.test(a)))) problems.push(`${at}: alt must be a list of skill names`);
+    if (e.alt !== undefined) {
+      if (!Array.isArray(e.alt) || !e.alt.every(a => typeof a === 'string' && SKILL_ALT.test(a))) problems.push(`${at}: alt must be a list of skill names (up to 80 characters each)`);
+      else if (e.alt.length > MAX_ALT) problems.push(`${at}: alt may have at most ${MAX_ALT} entries`);
+    }
     if (e.when !== undefined) {
       if (!Array.isArray(e.when) || e.when.length === 0) problems.push(`${at}: when must be a non-empty list of fact tags (leave it out to always show the hint)`);
+      else if (e.when.length > MAX_WHEN) problems.push(`${at}: when may have at most ${MAX_WHEN} tags`);
       else {
         const unknown = e.when.filter(t => !FACT_TAGS.includes(t));
         if (unknown.length) problems.push(`${at}: when has unknown fact tags ${unknown.map(t => JSON.stringify(t)).join(', ')}`);

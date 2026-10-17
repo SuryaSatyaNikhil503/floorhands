@@ -24,8 +24,14 @@ function factsBlock(facts) {
 }
 
 // Routing hints derived from the facts, so the plan reflects what floorhands can actually run here.
+// Only infrastructure tools that mean AWS point at the AWS reviewer; docker, kubernetes, helm and CI say nothing about the cloud.
+const AWS_INFRA = new Set(['terraform', 'cdk', 'cloudformation', 'serverless']);
+
 function routingHints(facts) {
   if (facts === null || typeof facts !== 'object') return [];
+  // detectStack returns the same empty facts for a failed scan as for an empty folder; with no files listed there is nothing to route on,
+  // and "no test script" would be a claim about a scan that found nothing.
+  if (facts.fileCount === 0) return [];
   const c = facts.commands !== null && typeof facts.commands === 'object' ? facts.commands : {};
   const hints = [];
   if (c.test !== true && c.e2e !== true) {
@@ -36,8 +42,8 @@ function routingHints(facts) {
   }
   const frameworks = Array.isArray(facts.frameworks) ? facts.frameworks : [];
   const infra = Array.isArray(facts.infra) ? facts.infra : [];
-  if (infra.length && !frameworks.length) {
-    hints.push('The repository shows infrastructure files but no application framework: prefer the AWS reviewer (raws) over the front-end and back-end reviewers.');
+  if (infra.some(t => AWS_INFRA.has(t)) && !frameworks.length) {
+    hints.push('The repository shows AWS-style infrastructure files (Terraform, CDK, CloudFormation or Serverless) but no application framework: prefer the AWS reviewer (raws) over the front-end and back-end reviewers.');
   }
   return hints;
 }
