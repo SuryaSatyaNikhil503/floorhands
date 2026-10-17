@@ -9,13 +9,17 @@
 // --exclude-standard` (tracked plus untracked-but-not-ignored) so a brand new repo with no commits still reports its stack.
 //
 // Running git inside an untrusted repository is the one place this module comes near "executing something from the repo": git reads
-// the repo's own .git/config, and a hostile config can name programs (core.sshCommand, remote.<n>.uploadpack, core.fsmonitor,
-// core.worktree, ...). So git mode is used only when <root>/.git is a REAL directory (never a file or symlink), and every call
-//   - names the git dir and work tree explicitly (core.worktree and a gitdir: redirect are ignored),
-//   - passes `--no-lazy-fetch` (a promisor-style config could otherwise make `--exclude-standard` fetch a missing blob, which runs the
-//     configured ssh/uploadpack command), plus GIT_NO_LAZY_FETCH=1 and `protocol.allow=never`,
-//   - runs with every GIT_* variable removed from the environment and GIT_CEILING_DIRECTORIES set.
-// If the installed git does not understand `--no-lazy-fetch` the call fails and the bounded directory walk is used instead.
+// the repo's own .git/config, and a hostile config can name programs (core.sshCommand, remote.<n>.uploadpack, core.gitProxy,
+// core.fsmonitor, core.worktree, ...). So git mode is used only when <root>/.git is a REAL directory (never a file or symlink), and
+// every call is built by gitInvocation() from the GIT_HARDENING layers below:
+//   - noLazyFetch (`--no-lazy-fetch` and GIT_NO_LAZY_FETCH=1): `--exclude-standard` can read a missing blob from a promisor remote and
+//     git would then fetch it over whatever transport the config names. Either switch alone blocks that; both are set.
+//   - protocolNever: `protocol.allow=never` AND `protocol.<name>.allow=never` for each transport. The general setting alone is not
+//     enough, because a repo config `protocol.<name>.allow = always` overrides it; command-line -c beats repo config.
+//   - basics: explicit --git-dir/--work-tree (core.worktree and gitdir: redirects are ignored), neutral config, no GIT_* from the
+//     caller's environment, GIT_CEILING_DIRECTORIES.
+// Each layer is tested alone against seven hostile configs (see test/stack.test.js). If the installed git does not understand
+// `--no-lazy-fetch` the call fails and the bounded directory walk is used instead.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -54,6 +58,8 @@ const MAX_WALK_ENTRIES = 5000;
 const MAX_WALK_DEPTH = 8;
 const MAX_FILES = 100000; // entries kept AFTER skipped directories are filtered out
 const MAX_ROOT_ENTRIES = 20000;
+const MAX_DIR_ENTRIES = 2000;
+const MAX_TOP_DIRS = 200;
 const GIT_TIMEOUT_MS = 5000;
 const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 const MAX_PACKAGES = 50;
@@ -266,22 +272,46 @@ function acceptPath(rel, entries, seen) {
   entries.push({ rel, parts });
 }
 
-function gitEnv(root) {
+// The layers that keep git from running anything named by the untrusted .git/config. Each layer is described separately and the production
+// invocation is built from these same objects (tests run git with one layer at a time to prove each one on its own).
+//  - noLazyFetch: stops git fetching a missing blob from a "promisor" remote while it reads ignore rules; that fetch is the only way
+//    `ls-files` ever reaches a transport. Two switches (global option and environment variable), either is enough.
+//  - protocolNever: forbids every transport. The general `protocol.allow` alone is NOT enough: a repo config `protocol.<name>.allow =
+//    always` beats it, so each transport is also forbidden by name on the command line (command-line -c wins over repo config).
+//  - basics: explicit git dir and work tree (core.worktree and gitdir: redirects are ignored), neutral config, scrubbed environment.
+const PROTOCOLS = ['ssh', 'file', 'ext', 'git', 'http', 'https', 'ftp', 'ftps'];
+const deepFreeze = (o) => { for (const v of Object.values(o)) if (v && typeof v === 'object') deepFreeze(v); return Object.freeze(o); };
+const GIT_HARDENING = deepFreeze({
+  noLazyFetch: { globalArgs: ['--no-lazy-fetch'], env: { GIT_NO_LAZY_FETCH: '1' } },
+  protocolNever: { configArgs: ['-c', 'protocol.allow=never', ...PROTOCOLS.flatMap(p => ['-c', `protocol.${p}.allow=never`])] },
+  basics: {
+    configArgs: ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'core.excludesFile=/dev/null', '-c', 'core.attributesFile=/dev/null'],
+    env: { GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+  },
+});
+const ALL_LAYERS = Object.freeze({ noLazyFetchArg: true, noLazyFetchEnv: true, protocolNever: true });
+
+// Builds { args, env } for `git <tail>` in root. `layers` exists so tests can switch single layers off; production uses ALL_LAYERS.
+function gitInvocation(root, tail, layers = ALL_LAYERS) {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_') && typeof v === 'string') env[k] = v;
-  return { ...env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', GIT_CEILING_DIRECTORIES: path.dirname(root) };
+  Object.assign(env, GIT_HARDENING.basics.env, { GIT_CEILING_DIRECTORIES: path.dirname(root) });
+  if (layers.noLazyFetchEnv) Object.assign(env, GIT_HARDENING.noLazyFetch.env);
+  const args = [
+    ...(layers.noLazyFetchArg ? GIT_HARDENING.noLazyFetch.globalArgs : []), // global options go before -c
+    `--git-dir=${path.join(root, '.git')}`, `--work-tree=${root}`,
+    ...(layers.protocolNever ? GIT_HARDENING.protocolNever.configArgs : []),
+    ...GIT_HARDENING.basics.configArgs,
+    ...tail,
+  ];
+  return { args, env };
 }
 
 // Returns entries, or null when git cannot be used safely (the caller then walks the directory).
 function gitEntries(root) {
   const skipSpecs = [...SKIP_DIRS].map(d => `:(exclude,glob)**/${d}/**`);
-  const args = [
-    '--no-lazy-fetch', `--git-dir=${path.join(root, '.git')}`, `--work-tree=${root}`,
-    '-c', 'protocol.allow=never', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
-    '-c', 'core.excludesFile=/dev/null', '-c', 'core.attributesFile=/dev/null',
-    'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...skipSpecs,
-  ];
-  const r = spawnSync('git', args, { cwd: root, env: gitEnv(root), timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const inv = gitInvocation(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...skipSpecs]);
+  const r = spawnSync('git', inv.args, { cwd: root, env: inv.env, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   // A timeout or an oversized listing still leaves the entries read so far; any other failure (including an old git that does not know
   // --no-lazy-fetch) means "not usable".
   if (r.error ? !r.stdout : r.status !== 0) return null;
@@ -320,19 +350,38 @@ function walkEntries(root) {
   return entries;
 }
 
-// Root marker files are found by looking in the root directory itself, so no listing cap or listing gap can hide them.
-function addRootMarkers(root, entries) {
-  const have = new Set(entries.filter(e => e.parts.length === 1).map(e => e.rel));
+// Manifests and lockfiles are also found by reading directories directly, so no listing cap or listing gap can hide them:
+// the root, each top-level directory (one level), and the immediate children of packages/, apps/ and services/.
+function readDirBounded(dirPath, limit) {
+  const out = [];
   let dir = null;
   try {
-    dir = fs.opendirSync(root);
-    for (let i = 0; i < MAX_ROOT_ENTRIES; i++) {
+    dir = fs.opendirSync(dirPath);
+    for (let i = 0; i < limit; i++) {
       const d = dir.readSync();
       if (!d) break;
-      if (d.isFile() && isRootMarker(d.name) && !have.has(d.name)) entries.push({ rel: d.name, parts: [d.name] });
+      out.push(d);
     }
-  } catch { /* unreadable root */ } finally {
+  } catch { /* unreadable directory */ } finally {
     if (dir) { try { dir.closeSync(); } catch { /* closed */ } }
+  }
+  return out;
+}
+
+function addMarkerFiles(root, entries) {
+  const have = new Set(entries.filter(e => e.parts.length <= 3).map(e => e.rel));
+  const add = (...parts) => {
+    const rel = parts.join('/');
+    if (!have.has(rel)) { have.add(rel); entries.push({ rel, parts }); }
+  };
+  const markers = (parts) => {
+    for (const f of readDirBounded(path.join(root, ...parts), MAX_DIR_ENTRIES)) if (f.isFile() && isRootMarker(f.name)) add(...parts, f.name);
+  };
+  const subdirs = (parts) => readDirBounded(path.join(root, ...parts), MAX_DIR_ENTRIES).filter(d => d.isDirectory() && !SKIP_DIRS.has(d.name));
+  for (const d of readDirBounded(root, MAX_ROOT_ENTRIES)) if (d.isFile() && isRootMarker(d.name)) add(d.name);
+  for (const top of subdirs([]).slice(0, MAX_TOP_DIRS)) {
+    markers([top.name]);
+    if (WORKSPACE_DIRS.has(top.name)) for (const child of subdirs([top.name])) markers([top.name, child.name]);
   }
 }
 
@@ -351,13 +400,41 @@ function stripBlocks(text, open, close) {
 }
 const mapLines = (text, fn) => text.split('\n').map(fn).join('\n');
 const stripHash = (text) => mapLines(text, l => l.replace(/(^|\s)#.*$/, '$1'));
-const stripSlashSlash = (text) => mapLines(text, l => l.replace(/(^|\s)\/\/.*$/, '$1'));
+// Removes // and /* */ comments but copies quoted strings through untouched (a glob such as '**/*Config.class' contains "/*").
+function stripGradleComments(text) {
+  const out = [];
+  let i = 0;
+  let from = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      i++;
+      while (i < n && text[i] !== c && text[i] !== '\n') i += text[i] === '\\' ? 2 : 1; // a string ends at its quote or at the line end
+      i++;
+    } else if (c === '/' && text[i + 1] === '/') {
+      out.push(text.slice(from, i));
+      const nl = text.indexOf('\n', i);
+      i = nl < 0 ? n : nl;
+      from = i;
+    } else if (c === '/' && text[i + 1] === '*') {
+      out.push(text.slice(from, i), ' ');
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? n : end + 2;
+      from = i;
+    } else i++;
+  }
+  out.push(text.slice(from));
+  return out.join('');
+}
 const stripUrls = (text) => mapLines(text, l => l.split(/\s+/).filter(w => !w.includes('://')).join(' '));
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const BOUNDARY_BEFORE = '(?<![a-z0-9_.-])';
 const wordRe = (name) => new RegExp(`${BOUNDARY_BEFORE}${escapeRe(name)}(?![a-z0-9_.-])`);
-const PY_RES = PY_RULES.map(r => [r, wordRe(r.name)]);
+// Python names: a hyphen, dot or bracket may touch the name (Flask-SQLAlchemy, pytest-cov, [tool.pytest.ini_options]); letters, digits and _ may not.
+const pyWordRe = (name) => new RegExp(`(?<![a-z0-9_])${escapeRe(name)}(?![a-z0-9_])`);
+const PY_RES = PY_RULES.map(r => [r, pyWordRe(r.name)]);
 const RAILS_RE = wordRe(RAILS.name);
 const LARAVEL_RE = wordRe(LARAVEL.name);
 const GRADLE_RES = JVM_RULES.map(r => [r, new RegExp(`${BOUNDARY_BEFORE}${escapeRe(r.artifact)}(?![a-z0-9_.])`), new RegExp(`${BOUNDARY_BEFORE}${escapeRe(r.group)}(?![a-z0-9_-])`)]);
@@ -393,7 +470,7 @@ function scanPom(text, acc) {
 }
 
 function scanGradle(text, acc) {
-  const src = stripSlashSlash(stripBlocks(text, '/*', '*/')).toLowerCase();
+  const src = stripGradleComments(text).toLowerCase();
   for (const [rule, artifactRe, groupRe] of GRADLE_RES) if (artifactRe.test(src) || groupRe.test(src)) addTag(acc, rule);
   if (KOTLIN_RE.test(src)) addTag(acc, KOTLIN);
 }
@@ -499,9 +576,10 @@ function rankLanguages(counts, hints) {
 
 function openRoot(root) {
   if (typeof root !== 'string' || root === '') return null;
-  const st = lstatOrNull(root);
+  const abs = path.resolve(root); // git is given explicit absolute paths, so a relative root must be made absolute first
+  const st = lstatOrNull(abs);
   if (!st) return null;
-  const dir = st.isSymbolicLink() ? fs.realpathSync(root) : root; // the caller named the root itself; only paths inside it are untrusted
+  const dir = st.isSymbolicLink() ? fs.realpathSync(abs) : abs; // the caller named the root itself; only paths inside it are untrusted
   if (!lstatOrNull(dir)?.isDirectory()) return null;
   return { dir, realRoot: fs.realpathSync(dir), gitEntry: lstatOrNull(path.join(dir, '.git')) };
 }
@@ -522,7 +600,7 @@ function detect(root) {
   const entries = (r.gitEntry?.isDirectory() ? gitEntries(r.dir) : null) ?? walkEntries(r.dir);
   acc.fileCount = entries.length;
   const counts = countLanguages(entries);
-  addRootMarkers(r.dir, entries);
+  addMarkerFiles(r.dir, entries);
   const { candidates, packageDirs } = scanNames(r.dir, entries, acc);
   detectPackageManager(r.dir, acc);
   const rootWorkspaces = readManifests(r.dir, r.realRoot, candidates, acc);
@@ -595,7 +673,7 @@ const tables = [
   { name: 'EXT_LANG', entries: [...EXT_LANG.values()].map(token => tag('languages', token)) },
 ];
 export const _testing = {
-  VOCAB, tables,
+  VOCAB, tables, GIT_HARDENING, gitInvocation,
   readManifest(root, parts, hooks) {
     let realRoot = root;
     try { realRoot = fs.realpathSync(root); } catch { /* use as given */ }

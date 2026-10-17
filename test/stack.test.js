@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { detectStack, renderFacts, FACT_TAGS, _testing } from '../server/stack.js';
 
 const made = [];
@@ -567,7 +567,18 @@ const exists = (p) => fs.existsSync(p);
 const setConfig = (root, text) => fs.appendFileSync(path.join(root, '.git', 'config'), text);
 
 // Reviewer fixture: a skip-worktree .gitignore whose blob is gone, in a repo that claims to be a partial clone. git lazily fetches the
-// blob while reading ignore rules, and that fetch runs core.sshCommand / remote.<n>.uploadpack from the untrusted .git/config.
+// blob while reading ignore rules, and that fetch uses the transport named by the untrusted .git/config, which can name a program.
+// Each variant is a different way for the config to reach a program; all of them must be blocked.
+const PROMISOR = (extra) => `[core]\n\trepositoryformatversion = 1\n[extensions]\n\tpartialClone = origin\n[remote "origin"]\n\tpromisor = true\n${extra}`;
+const HOSTILE_VARIANTS = {
+  'ssh + sshCommand': (S) => PROMISOR(`\turl = ssh://evil.invalid/x\n[core]\n\tsshCommand = ${S}\n`),
+  'file + uploadpack': (S) => PROMISOR(`\turl = file:///tmp\n\tuploadpack = ${S}\n`),
+  'ssh + protocol.ssh.allow=always': (S) => PROMISOR(`\turl = ssh://evil.invalid/x\n[core]\n\tsshCommand = ${S}\n[protocol "ssh"]\n\tallow = always\n`),
+  'file + protocol.file.allow=always': (S) => PROMISOR(`\turl = file:///tmp\n\tuploadpack = ${S}\n[protocol "file"]\n\tallow = always\n`),
+  'ext:: + protocol.ext.allow=always': (S) => PROMISOR(`\turl = ext::${S} x\n[protocol "ext"]\n\tallow = always\n`),
+  'url.insteadOf -> ssh': (S) => PROMISOR(`\turl = https://rewrite.invalid/x\n[url "ssh://evil.invalid/"]\n\tinsteadOf = https://rewrite.invalid/\n[core]\n\tsshCommand = ${S}\n[protocol "ssh"]\n\tallow = always\n`),
+  'git:// + core.gitProxy': (S) => PROMISOR(`\turl = git://evil.invalid/x\n[core]\n\tgitProxy = ${S}\n[protocol "git"]\n\tallow = always\n`),
+};
 function promisorFixture(variant) {
   const root = tmp();
   const marker = path.join(tmp(), 'canary');
@@ -583,15 +594,11 @@ function promisorFixture(variant) {
   const sha = git(root, 'rev-parse', ':d/.gitignore').trim();
   fs.rmSync(path.join(root, '.git', 'objects', sha.slice(0, 2), sha.slice(2)));
   put(root, 'd/new.txt', 'x');
-  if (variant === 'ssh') {
-    setConfig(root, `[core]\n\trepositoryformatversion = 1\n\tsshCommand = ${script}\n[extensions]\n\tpartialClone = origin\n[remote "origin"]\n\tpromisor = true\n\turl = ssh://evil.invalid/x\n`);
-  } else {
-    setConfig(root, `[core]\n\trepositoryformatversion = 1\n[extensions]\n\tpartialClone = origin\n[remote "origin"]\n\tpromisor = true\n\turl = file:///tmp\n\tuploadpack = ${script}\n`);
-  }
+  setConfig(root, HOSTILE_VARIANTS[variant](script));
   return { root, marker };
 }
-for (const variant of ['ssh', 'uploadpack']) {
-  test(`CRITICAL: a promisor-style .git/config cannot make git run a program (${variant})`, () => {
+for (const variant of Object.keys(HOSTILE_VARIANTS)) {
+  test(`CRITICAL: a hostile .git/config cannot make detectStack run a program (${variant})`, () => {
     const { root, marker } = promisorFixture(variant);
     const f = detectStack(root);
     assert.equal(exists(marker), false, 'canary was executed by the repository config');
@@ -600,6 +607,53 @@ for (const variant of ['ssh', 'uploadpack']) {
     assert.ok(f.tags.includes('no-npm-scripts'));
   });
 }
+
+// Layer by layer: run `git ls-files` directly against each hostile fixture with exactly ONE protection layer enabled.
+// "no layer" must run the canary, otherwise the fixtures prove nothing.
+const LAYER_SETS = {
+  none: { noLazyFetchArg: false, noLazyFetchEnv: false, protocolNever: false },
+  'noLazyFetch flag only': { noLazyFetchArg: true, noLazyFetchEnv: false, protocolNever: false },
+  'noLazyFetch env only': { noLazyFetchArg: false, noLazyFetchEnv: true, protocolNever: false },
+  'protocolNever only': { noLazyFetchArg: false, noLazyFetchEnv: false, protocolNever: true },
+  'all layers': { noLazyFetchArg: true, noLazyFetchEnv: true, protocolNever: true },
+};
+const LS = ['ls-files', '-z', '--cached', '--others', '--exclude-standard'];
+test('protection layers one at a time: which hostile config variants does each block?', { timeout: 120000 }, () => {
+  const { gitInvocation } = _testing;
+  const fixtures = Object.keys(HOSTILE_VARIANTS).map(v => [v, promisorFixture(v)]);
+  const matrix = {};
+  for (const [layerName, layers] of Object.entries(LAYER_SETS)) {
+    matrix[layerName] = {};
+    for (const [variant, { root, marker }] of fixtures) {
+      fs.rmSync(marker, { force: true });
+      const inv = gitInvocation(root, LS, layers);
+      spawnSync('git', inv.args, { cwd: root, env: inv.env, encoding: 'utf8', timeout: 15000, stdio: 'ignore' });
+      matrix[layerName][variant] = exists(marker) ? 'RAN' : 'blocked';
+    }
+  }
+  if (process.env.STACK_MATRIX) console.error(JSON.stringify(matrix, null, 1));
+  for (const variant of Object.keys(HOSTILE_VARIANTS)) {
+    assert.equal(matrix.none[variant], 'RAN', `fixture is not a real attack without protections: ${variant}`);
+    for (const layer of Object.keys(LAYER_SETS).filter(l => l !== 'none')) assert.equal(matrix[layer][variant], 'blocked', `${layer} did not block: ${variant}`);
+  }
+});
+
+test('the production git invocation is built from every hardening layer', () => {
+  const { gitInvocation, GIT_HARDENING } = _testing;
+  assert.ok(Object.isFrozen(GIT_HARDENING) && Object.isFrozen(GIT_HARDENING.noLazyFetch) && Object.isFrozen(GIT_HARDENING.protocolNever));
+  const root = tmp();
+  const inv = gitInvocation(root, LS);
+  assert.ok(inv.args.includes('--no-lazy-fetch'));
+  assert.ok(inv.args.indexOf('--no-lazy-fetch') < inv.args.indexOf('-c'), '--no-lazy-fetch is a global option and goes before -c');
+  assert.equal(inv.env.GIT_NO_LAZY_FETCH, '1');
+  for (const p of ['allow', 'ssh.allow', 'file.allow', 'ext.allow', 'git.allow', 'http.allow', 'https.allow']) assert.ok(inv.args.includes(`protocol.${p}=never`), p);
+  assert.ok(inv.args.includes(`--git-dir=${path.join(root, '.git')}`));
+  assert.ok(inv.args.includes(`--work-tree=${root}`));
+  assert.deepEqual(inv.args.slice(-LS.length), LS);
+  // a GIT_* variable from the caller is never inherited
+  process.env.GIT_SSH_COMMAND = 'x';
+  try { assert.equal(gitInvocation(root, LS).env.GIT_SSH_COMMAND, undefined); } finally { delete process.env.GIT_SSH_COMMAND; }
+});
 
 test('core.worktree pointing elsewhere does not redirect the listing', () => {
   const outside = tmp('floorhands-outside-');
@@ -842,4 +896,101 @@ test('every token in the detection tables is in VOCAB (a typo cannot silently dr
     }
   }
   assert.ok(n > 60);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Review round 2
+// ---------------------------------------------------------------------------------------------------------------------------------
+let bigRepo;
+// 110,000 non-skipped, untracked-but-unignored files in aaa/ sort before every marker, so a listing capped at 100,000 never reaches them.
+function bigFixture() {
+  if (bigRepo) return bigRepo;
+  const root = tmp();
+  git(root, 'init', '-q', '-b', 'main');
+  for (let d = 0; d < 1100; d++) {
+    const dir = path.join(root, 'aaa', `d${String(d).padStart(4, '0')}`);
+    fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(dir, `f${i}.txt`), '');
+  }
+  put(root, 'package.json', { scripts: { test: 'node --test' }, workspaces: ['apps/*'] });
+  put(root, 'yarn.lock', '');
+  put(root, 'apps/web/package.json', { dependencies: { react: '18', next: '14' } });
+  put(root, 'services/api/package.json', { dependencies: { fastify: '4' }, devDependencies: { vitest: '1' } });
+  put(root, 'packages/ui/package.json', { dependencies: { vue: '3' } });
+  put(root, 'zzz/readme.txt', '');
+  bigRepo = root;
+  return root;
+}
+
+test('root markers are found by reading the root directory when the listing is past the cap', { timeout: 120000 }, () => {
+  const f = detectStack(bigFixture());
+  assert.equal(f.hasGit, true);
+  assert.equal(f.commands.test, true);
+  assert.equal(f.packageManager, 'yarn');
+  assert.equal(f.monorepo.kind, 'workspaces');
+});
+
+test('nested workspace manifests (apps/*, packages/*, services/*) are found when the listing is past the cap', { timeout: 120000 }, () => {
+  const f = detectStack(bigFixture());
+  assert.equal(f.monorepo.packages, 3);
+  for (const t of ['react', 'next', 'fastify', 'vue']) assert.ok(f.frameworks.includes(t), t);
+  assert.ok(f.testTools.includes('vitest'));
+});
+
+test('top-level directories (frontend/, backend/) are scanned one level deep without the listing', () => {
+  const root = tmp();
+  put(root, 'frontend/package.json', { dependencies: { svelte: '4' } });
+  put(root, 'backend/pom.xml', '<artifactId>spring-boot-starter</artifactId>');
+  const f = detectStack(root);
+  assert.ok(f.frameworks.includes('svelte'));
+  assert.ok(f.frameworks.includes('spring-boot'));
+});
+
+test('python matching: hyphenated packages and tool tables count, near-misses do not', () => {
+  const tags = (files) => {
+    const root = tmp();
+    for (const [rel, body] of Object.entries(files)) put(root, rel, body);
+    const f = detectStack(root);
+    return [...f.frameworks, ...f.testTools].sort();
+  };
+  assert.deepEqual(tags({ 'requirements.txt': 'Flask-SQLAlchemy==3.1\n' }), ['flask', 'sqlalchemy']);
+  assert.deepEqual(tags({ 'requirements.txt': 'pytest-django==4\n' }), ['django', 'pytest']);
+  assert.deepEqual(tags({ 'requirements.txt': 'pytest-cov\n' }), ['pytest']);
+  assert.deepEqual(tags({ 'pyproject.toml': '[tool.pytest.ini_options]\naddopts = "-q"\n' }), ['pytest']);
+  assert.deepEqual(tags({ 'requirements.txt': 'flaskish==1\nmypytest\nxdjango\ndjango_x\n' }), []);
+  assert.deepEqual(tags({ 'requirements.txt': '# no pytest\nrequests @ https://github.com/pallets/flask/archive/main.zip\n' }), []);
+});
+
+test('gradle: a /* inside a quoted glob is not a comment start; a dependency after it is still found', () => {
+  const root = tmp();
+  put(root, 'build.gradle', [
+    "jacocoTestReport { classDirectories.setFrom(files(classDirectories.files.collect { fileTree(dir: it, exclude: ['**/*Config.class']) })) }",
+    'dependencies {',
+    '  implementation "org.springframework.boot:spring-boot-starter-web:3"',
+    "  testImplementation 'junit:junit:4.13'",
+    '}',
+    '',
+  ].join('\n'));
+  const f = detectStack(root);
+  assert.ok(f.frameworks.includes('spring-boot'));
+  assert.ok(f.testTools.includes('junit'));
+  // real block and line comments are still removed, and // inside a string (a URL) is kept intact
+  const r2 = tmp();
+  put(r2, 'build.gradle', '/* implementation "org.springframework.boot:spring-boot-starter" */\n// testImplementation "junit:junit:4"\nrepositories { maven { url "https://repo.example.invalid/m" } }\nimplementation "io.quarkus:quarkus-core:3"\n');
+  const f2 = detectStack(r2);
+  assert.deepEqual([f2.frameworks, f2.testTools], [['quarkus'], []]);
+});
+
+test('a relative root still uses git mode and gives the same facts as the absolute root', () => {
+  const root = tmp();
+  put(root, 'a.ts', '');
+  put(root, 'ignored.py', '');
+  put(root, '.gitignore', 'ignored.py\n');
+  git(root, 'init', '-q', '-b', 'main');
+  const rel = path.relative(process.cwd(), root);
+  assert.ok(!path.isAbsolute(rel));
+  const abs = detectStack(root);
+  assert.deepEqual(abs.languages, ['typescript'], 'git mode honours .gitignore');
+  assert.deepEqual(detectStack(rel), abs);
+  assert.equal(detectStack(rel).hasGit, true);
 });
