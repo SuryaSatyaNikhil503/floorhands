@@ -19,7 +19,6 @@
 - Never allowed for any tier: `git push`, deploys, `terraform apply`, `aws` CLI, reading `.env*`, `~/.aws`, `~/.ssh`, `*.pem`.
 - Agents never write to the owner's working copy; build/test steps run in a git worktree on branch `floorhands/<task-id>`.
 - Model/tool output is **data**: the UI renders it with `textContent` only, never `innerHTML`.
-- Every commit message ends with the trailer line: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` (pass it as a second `-m`).
 - Tests: `npm test` (runs `node --test test/*.test.js`). Real-`claude` checks live in `scripts/` and are never part of `npm test`.
 
 ## Review Focus
@@ -107,7 +106,7 @@ Expected: PASS (2 tests).
 
 ```bash
 git add package.json .gitignore test/sanity.test.js
-git commit -m "chore: scaffold package and test runner" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "chore: scaffold package and test runner"
 ```
 
 ---
@@ -268,7 +267,7 @@ Expected: PASS (6 tests).
 
 ```bash
 git add server/tiers.js test/tiers.test.js
-git commit -m "feat: tier permission model for claude CLI flags" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: tier permission model for claude CLI flags"
 ```
 
 ---
@@ -379,7 +378,7 @@ Create `docs/spike-findings.md` with: date, `claude --version` output, the PASS/
 
 ```bash
 git add scripts/spike-claude.mjs docs/spike-findings.md server/tiers.js test/tiers.test.js
-git commit -m "test: verify tier flags against the real claude CLI" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "test: verify tier flags against the real claude CLI"
 ```
 
 ---
@@ -693,7 +692,7 @@ Expected: PASS (5 tests).
 
 ```bash
 git add agents server/roster.js test/roster.test.js
-git commit -m "feat: nine-agent roster and prompts" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: nine-agent roster and prompts"
 ```
 
 ---
@@ -811,7 +810,7 @@ Expected: PASS (6 tests).
 
 ```bash
 git add server/plan.js test/plan.test.js
-git commit -m "feat: parse the architect's JSON plan" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: parse the architect's JSON plan"
 ```
 
 ---
@@ -1007,7 +1006,7 @@ Expected: PASS (7 tests).
 
 ```bash
 git add server/runner.js test/runner.test.js
-git commit -m "feat: run one agent turn through the claude CLI" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: run one agent turn through the claude CLI"
 ```
 
 ---
@@ -1192,7 +1191,7 @@ Expected: PASS (6 tests).
 
 ```bash
 git add server/store.js test/store.test.js
-git commit -m "feat: file-backed task store" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: file-backed task store"
 ```
 
 ---
@@ -1415,7 +1414,7 @@ Expected: PASS (8 tests).
 
 ```bash
 git add server/worktree.js test/worktree.test.js
-git commit -m "feat: git worktree isolation with approve and reject" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: git worktree isolation with approve and reject"
 ```
 
 ---
@@ -1756,7 +1755,7 @@ Expected: PASS (12 tests).
 
 ```bash
 git add server/orchestrator.js test/orchestrator.test.js
-git commit -m "feat: orchestrate architect plan, agent steps and approval" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: orchestrate architect plan, agent steps and approval"
 ```
 
 ---
@@ -2048,7 +2047,7 @@ Expected: PASS (8 tests).
 
 ```bash
 git add server/http.js test/http.test.js
-git commit -m "feat: local HTTP server with SSE and cross-site guards" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: local HTTP server with SSE and cross-site guards"
 ```
 
 ---
@@ -2595,7 +2594,7 @@ Expected: all tests across Tasks 1–11 PASS.
 
 ```bash
 git add server/state.js server/main.js server/cli.js bin scripts/fake-claude.mjs test/state.test.js test/cli.test.js test/e2e.test.js
-git commit -m "feat: project state, server entry point, CLI and end-to-end test" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: project state, server entry point, CLI and end-to-end test"
 ```
 
 ---
@@ -2993,7 +2992,7 @@ Fix any problem found in `ui/` and re-check before committing.
 
 ```bash
 git add ui test/floor.test.js
-git commit -m "feat: 2D floor-plan UI with live agents, tasks and diff approval" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: 2D floor-plan UI with live agents, tasks and diff approval"
 ```
 
 ---
@@ -3235,7 +3234,7 @@ Expected: all tests PASS.
 
 ```bash
 git add claude-plugin .claude-plugin scripts/install.sh test/hook.test.js
-git commit -m "feat: Claude Code plugin with /floorhands skill and opt-in SessionStart hook" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "feat: Claude Code plugin with /floorhands skill and opt-in SessionStart hook"
 ```
 
 ---
@@ -3397,7 +3396,7 @@ Run: `node scripts/spike-claude.mjs` — Expected: "All checks passed."
 
 ```bash
 git add scripts/smoke.mjs README.md docs/design/floorhands-design.md
-git commit -m "docs: README, smoke test, and spec aligned with the build" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git commit -m "docs: README, smoke test, and spec aligned with the build"
 ```
 
 - [ ] **Step 7: Hand over, then install only with the owner's OK**

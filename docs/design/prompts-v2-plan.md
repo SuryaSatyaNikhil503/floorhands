@@ -20,7 +20,7 @@
 - Each composed system prompt (common + tier + facts + notes + skills + role body) <= 24 KB; each role body <= 9 KB; facts block <= 2.5 KB; notes <= 4 KB.
 - Prompts must never tell an agent to run a command its tier cannot run (see `server/tiers.js`), never mention a specific owner/project/website/person, never promise capabilities the agent lacks (no web, no network, no editing for read/test tiers).
 - Tests use fake claude and temp dirs only; **no real `claude` calls outside `scripts/eval-prompts.mjs`**; temp dirs removed in `after` hooks; no stray processes.
-- Branch `prompts-v2` (created from `main`); do not push; do not touch `.git` config. Every commit message ends with the trailer `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` (second `-m`, copied exactly). Commit identity is already set locally (GitHub noreply) — do not change it.
+- Branch `prompts-v2` (created from `main`); do not push; do not touch `.git` config. Commit messages carry no co-author trailers. Commit identity is already set locally (GitHub noreply) — do not change it.
 - Product name is **floorhands** (lowercase). Docs say "team" for the group of agents, never "crew".
 
 ## Review Focus
