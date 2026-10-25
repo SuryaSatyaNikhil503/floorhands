@@ -1,0 +1,21 @@
+{
+  "note": "FORMAT EXAMPLE ONLY. This instance is a placeholder, not a real advisory or commit. Build the real corpus in corpus.json (see eval/bench/README.md): 20 to 50 verified fix commits, 10 of them listed in holdout.",
+  "instances": [
+    {
+      "id": "example-placeholder",
+      "repo": "https://github.com/example/example",
+      "fixCommit": "0000000000000000000000000000000000000000",
+      "advisory": "GHSA-2222-3333-4444",
+      "published": "2026-09-01",
+      "sourceFiles": ["src/search.js"],
+      "testFiles": ["test/search.test.js"],
+      "testCommand": ["npm", "test"],
+      "tasks": {
+        "review": "Review the search code in src/ for security problems.",
+        "build": "Searching for a product whose name contains a single quote returns a 500 error instead of results. Fix it."
+      },
+      "bug": "SQL injection: the search term is concatenated into the SQL string in src/search.js"
+    }
+  ],
+  "holdout": []
+}
