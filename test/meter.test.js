@@ -155,3 +155,19 @@ test('a hung upstream stream is cut after the idle limit, so the CLI can retry i
   hung.closeAllConnections?.();
   await new Promise(r => hung.close(r));
 });
+
+test('a path cannot point the meter at another host (the CLI\'s credentials travel with each request)', async () => {
+  const run = meter.open({ budgetUsd: 1 });
+  const before = api.requests.length;
+  // fetch would normalise the path, so send the raw request line.
+  const net = await import('node:net');
+  const { port } = new URL(run.url);
+  const raw = await new Promise((resolve, reject) => {
+    const sock = net.connect(Number(port), '127.0.0.1', () => sock.end(`POST /r/${run.id}//evil.example/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}`));
+    let out = ''; sock.on('data', d => { out += d; }); sock.on('end', () => resolve(out)); sock.on('error', reject);
+  });
+  assert.match(raw, /^HTTP\/1\.1 400/);
+  assert.match(raw, /bad path/);
+  assert.equal(api.requests.length, before, 'nothing was forwarded');
+  run.close();
+});
