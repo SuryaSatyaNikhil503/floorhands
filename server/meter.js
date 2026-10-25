@@ -114,7 +114,14 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
   }
 
   async function handle(run, req, res, rest, raw) {
-    const target = new URL(upstream.pathname.replace(/\/$/, '') + rest, upstream);
+    // Build the target from the fixed upstream and pin it: a path like "//evil.example/x" must never resolve to another host
+    // (the CLI's credentials travel with every request).
+    if (!rest.startsWith('/') || rest.startsWith('//') || rest.includes('\\')) return fail(res, 400, 'floorhands meter: bad path', 'invalid_request_error');
+    const target = new URL(upstream.href);
+    const q = rest.indexOf('?');
+    target.pathname = upstream.pathname.replace(/\/$/, '') + (q < 0 ? rest : rest.slice(0, q));
+    target.search = q < 0 ? '' : rest.slice(q);
+    if (target.protocol !== upstream.protocol || target.host !== upstream.host) return fail(res, 400, 'floorhands meter: bad upstream', 'invalid_request_error');
     const isMessages = req.method === 'POST' && /^\/v1\/messages(\?|$)/.test(rest);
     let send = raw, reserve = 0, model = null, inputTokens = 0;
     if (isMessages) {
