@@ -674,6 +674,7 @@ async function main() {
     const code = fatal ? 4 : exitCode(results);
     if (opts.out) {
       const json = redactInventory({ claudeVersion: version, date: new Date().toISOString(), model: opts.fakeModel ? 'scripted-worst-case' : 'real', calls, results, inits: runInits }, opts.verboseInventory);
+      fs.mkdirSync(path.dirname(path.resolve(opts.out)), { recursive: true });
       fs.writeFileSync(`${opts.out}.json`, JSON.stringify(json, null, 2) + '\n');
       fs.writeFileSync(`${opts.out}.md`, renderMarkdown(json.results) + '\n');
     }

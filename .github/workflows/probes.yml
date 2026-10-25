@@ -97,7 +97,9 @@ jobs:
           claude --version
 
       - name: Run the probes
-        run: node scripts/spike-claude.mjs --fake-model --out "probe-results/${{ runner.os }}"
+        # The script exits non-zero on any FAIL, including probes that only check the owner's installed skills (a runner has none).
+        # The comparison below is the gate: it knows which probes depend on the machine. A missing results file still fails it.
+        run: node scripts/spike-claude.mjs --fake-model --out "probe-results/${{ runner.os }}" || echo "probe script exited $?; the comparison decides"
 
       - name: Compare with the committed baseline
         run: node scripts/probe-compare.mjs "probe-results/${{ runner.os }}.json" docs/spike-results-0.3.0.json
