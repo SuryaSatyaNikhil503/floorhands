@@ -129,6 +129,11 @@ export function riskFlags(files) {
   return out.slice(0, 50);
 }
 
+// Files that define HOW tests run (not what they test): package manager config and test-runner config. A builder changing one of
+// these would decide what `npm test` executes, so the tester's step is skipped. Test files themselves still run, in the sandbox.
+const TEST_DEFINITION = /(^|\/)(\.npmrc|\.yarnrc(\.yml)?|\.pnpmfile\.cjs|\.mocharc(\.[\w]+)?|(jest|vitest|vite|mocha|ava|playwright|cypress|karma|babel)\.config\.[\w.]+|\.babelrc(\.[\w]+)?)$/;
+export const changesTestDefinition = files => (Array.isArray(files) ? files : []).filter(f => TEST_DEFINITION.test(String(f)));
+
 // Whether the "scripts" of the root package.json differ between the task's base commit and the worktree. A builder can rewrite what
 // `npm test` runs, so a test step after such a change would execute agent-written code: the orchestrator refuses that step.
 export async function scriptsChanged(wt) {
@@ -173,14 +178,12 @@ export async function approve(root, wt, message, { base = worktreeBase(root) } =
   if (!(await gitOk(root, ['symbolic-ref', '-q', 'HEAD']))) {
     throw new Error(`Your repository is on a detached HEAD. Check out a branch, then approve again. The floorhands branch ${wt.branch} is kept.`);
   }
-  // The merge runs the owner's own hooks, unless the branch itself changed files under a hooks directory: then those hooks are
-  // agent-written, and running them on Approve would execute agent code outside every sandbox, so this merge runs with none.
-  let changed = [];
-  try { changed = await changedFiles(root, wt); } catch { /* treat as unknown below */ }
-  const hooksTouched = !changed.length || riskFlags(changed).some(f => f.flag === 'git-hooks') || await touchesHooksPath(root, changed);
-  const hookArgs = hooksTouched ? ['-c', 'core.hooksPath=/dev/null'] : [];
+  // The merge never runs hooks. They run after the merged files are in the working tree, and ordinary hooks load repository files
+  // an agent may have changed (commitlint.config.js, lefthook.yml, .pre-commit-config.yaml, package.json scripts through npm install),
+  // which would run agent-written code outside every sandbox. Run your hooks yourself after reviewing the merge if you need them.
+  const hookArgs = ['-c', 'core.hooksPath=/dev/null'];
   try {
-    await git(root, [...hookArgs, ...(await identityArgs(root)), 'merge', '--no-ff', '-m', message, '--', wt.branch]);
+    await git(root, [...hookArgs, ...(await identityArgs(root)), 'merge', '--no-ff', '--no-verify', '-m', message, '--', wt.branch]);
   } catch {
     // Only abort a merge our own attempt left behind; the owner's was ruled out above.
     if (await gitOk(root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])) {
@@ -191,17 +194,9 @@ export async function approve(root, wt, message, { base = worktreeBase(root) } =
   let mergeSha = null;
   try { mergeSha = (await git(root, [...SAFE_GIT, 'rev-parse', 'HEAD'])).trim(); } catch { /* recorded as unknown */ }
   await cleanup(root, wt);
-  return { mergeSha, hooksSkipped: hooksTouched };
+  return { mergeSha, hooksSkipped: true };
 }
 
-// True when a changed file lies under the repository's configured core.hooksPath (e.g. a custom hooks folder in the repo).
-async function touchesHooksPath(root, changed) {
-  let hp;
-  try { hp = (await git(root, ['config', '--get', 'core.hooksPath'])).trim(); } catch { return false; }
-  if (!hp || hp.startsWith('/') || hp.startsWith('~')) return false;
-  const dir = hp.replace(/^\.\//, '').replace(/\/+$/, '') + '/';
-  return changed.some(f => f.startsWith(dir));
-}
 
 export async function reject(root, wt, { base = worktreeBase(root) } = {}) {
   assertOwned(wt, base);

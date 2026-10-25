@@ -375,7 +375,7 @@ test('approve returns the merge sha', async () => {
   await commitAll(wt, 'b', { root });
   const res = await approve(root, wt, 'merge', { base });
   assert.equal(res.mergeSha, sh(root, 'rev-parse', 'HEAD').trim());
-  assert.equal(res.hooksSkipped, false);
+  assert.equal(res.hooksSkipped, true, 'Approve never runs hooks');
 });
 
 test('approve does not run a hook the agent wrote, even when the repo points core.hooksPath at it', async () => {
@@ -396,15 +396,23 @@ test('approve does not run a hook the agent wrote, even when the repo points cor
   assert.ok(fs.existsSync(path.join(root, '.husky', 'post-merge')), 'the change itself was merged');
 });
 
-test('approve keeps running the owner\'s hooks when the branch does not touch them', async () => {
+test('approve runs none of the owner\'s hooks either: an ordinary commit-msg hook that loads a repo config file would run agent code', async () => {
+  // Reproduces the review finding: the owner's commit-msg hook require()s commitlint.config.js, which the agent changed.
   const { root, base } = makeRepo();
   const marker = path.join(tmp('floorhands-mark-'), 'ran');
-  fs.writeFileSync(path.join(root, '.git', 'hooks', 'post-merge'), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(root, 'commitlint.config.js'), 'module.exports = {};\n');
+  sh(root, 'add', '-A');
+  sh(root, 'commit', '-q', '-m', 'config');
+  for (const h of ['commit-msg', 'prepare-commit-msg', 'post-merge', 'pre-merge-commit']) {
+    fs.writeFileSync(path.join(root, '.git', 'hooks', h), `#!/bin/sh\nnode -e "require('${root}/commitlint.config.js')"\n`, { mode: 0o755 });
+  }
   const wt = await createWorktree(root, 't-own', { base });
-  fs.writeFileSync(path.join(wt.dir, 'c.txt'), 'x\n');
+  fs.writeFileSync(path.join(wt.dir, 'commitlint.config.js'), `require('fs').writeFileSync(${JSON.stringify(marker)}, 'PWNED'); module.exports = {};\n`);
   await commitAll(wt, 'c', { root });
-  await approve(root, wt, 'merge', { base });
-  assert.equal(fs.existsSync(marker), true);
+  const res = await approve(root, wt, 'merge', { base });
+  assert.equal(res.hooksSkipped, true);
+  assert.equal(fs.existsSync(marker), false, 'no hook ran, so the agent-written config was never executed');
+  assert.match(fs.readFileSync(path.join(root, 'commitlint.config.js'), 'utf8'), /PWNED/, 'the change itself was merged');
 });
 
 test('the server\'s diff never runs a diff.external program from the repository config', async () => {
