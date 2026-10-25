@@ -43,3 +43,10 @@ test('the committed baselines load and compare cleanly against themselves', () =
   // skill-names is a functional FAIL recorded in round 1 that depends on installed plugins: a warning, not a regression.
   assert.deepEqual(r.warnings.map(l => l.split(':')[0]), ['skill-names']);
 });
+
+
+test('review #14: a probe that passed in the baseline but did not run fails the gate', () => {
+  const r = compare(res(['a', 'PASS']), [res(['a', 'PASS'], ['b', 'PASS'])]);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.missing, ['b']);
+});

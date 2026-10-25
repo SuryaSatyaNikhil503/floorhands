@@ -50,7 +50,7 @@ jobs:
           version="${WANTED:-$(npm view @anthropic-ai/claude-code version)}"
           if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then echo "bad version: $version"; exit 1; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "key=probed-$version-${{ hashFiles('server/tiers.js', 'server/runner.js', 'scripts/spike-claude.mjs', 'scripts/spike-lib.mjs') }}" >> "$GITHUB_OUTPUT"
+          echo "key=probed-$version-${{ hashFiles('server/tiers.js', 'server/runner.js', 'scripts/spike-claude.mjs', 'scripts/spike-lib.mjs', 'scripts/fake-anthropic.mjs', 'scripts/probe-model.mjs', 'scripts/probe-compare.mjs', 'docs/spike-results-0.3.0.json') }}" >> "$GITHUB_OUTPUT"
       # A marker cached after a green run: the daily schedule skips a version and permission model it already probed.
       - id: seen
         uses: actions/cache/restore@v4

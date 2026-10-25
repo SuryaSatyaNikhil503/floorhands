@@ -4,6 +4,7 @@ import { loadNotes } from './notes.js';
 import { buildSystem, skillHints } from './prompt.js';
 import { mergePolicy, resolveStep, createLimiter } from './models.js';
 import { redact } from './redact.js';
+import { usesThirdPartyProvider } from './runner.js';
 import crypto from 'node:crypto';
 
 const FENCE = '`'.repeat(3);
@@ -118,12 +119,14 @@ export function createOrchestrator({ root, roster, store, runner, wt, emit = () 
     const timer = setTimeout(() => decide({ decision: 'stop', by: 'timeout' }), ASK_TIMEOUT_MS);
     timer.unref?.();
     const decide = ({ decision, extraUsd = 0, by = 'owner' }) => {
+      if (asking.get(task.id)?.decide !== decide) return; // already answered or cancelled
       clearTimeout(timer);
       asking.delete(task.id);
       const allowUsd = decision === 'allow' ? extraUsd : 0;
       task.extraBudgetUsd = Math.round(((task.extraBudgetUsd ?? 0) + allowUsd) * 10000) / 10000;
       task.budgetDecisions = [...(task.budgetDecisions ?? []), { at: stamp(), agent: agent.id, kind, decision, extraUsd: allowUsd, by }];
-      save(task, { status: prev, budgetRequest: null });
+      // Restore the status only if the task is still waiting on this question (its run may have ended meanwhile).
+      save(task, { ...(task.status === 'needs_budget' ? { status: prev } : {}), budgetRequest: null });
       resolve(decision === 'allow' ? { allowUsd } : { stop: true });
     };
     const prev = task.status;
@@ -137,10 +140,12 @@ export function createOrchestrator({ root, roster, store, runner, wt, emit = () 
     const q = asking.get(taskId);
     if (!q) throw new Error('This task is not waiting for a budget decision.');
     if (decision !== 'allow' && decision !== 'stop') throw new Error('decision must be "allow" or "stop".');
-    if (decision === 'allow' && !(typeof extraUsd === 'number' && Number.isFinite(extraUsd) && extraUsd > 0 && extraUsd <= MAX_EXTRA_USD)) {
-      throw new Error(`extraUsd must be a number above 0 and at most ${MAX_EXTRA_USD}.`);
+    const cents = typeof extraUsd === 'number' && Number.isFinite(extraUsd) ? Math.round(extraUsd * 100) / 100 : NaN;
+    // Validated after rounding: $0.004 would round to $0, which the guard would read as "stop".
+    if (decision === 'allow' && !(cents >= 0.01 && cents <= MAX_EXTRA_USD)) {
+      throw new Error(`extraUsd must be at least 0.01 and at most ${MAX_EXTRA_USD} dollars.`);
     }
-    q.decide({ decision, extraUsd: decision === 'allow' ? Math.round(extraUsd * 100) / 100 : 0 });
+    q.decide({ decision, extraUsd: decision === 'allow' ? cents : 0 });
   }
   const waiting = new Set(); // tasks queued for a slot (see run)
   async function exclusive(taskId, fn) {
@@ -187,11 +192,12 @@ export function createOrchestrator({ root, roster, store, runner, wt, emit = () 
         if (!task.cliVersion && metrics.cliVersion) task.cliVersion = metrics.cliVersion;
       };
       // With the spending guard, each run gets its own metered budget; running out pauses the task and asks the owner.
-      const meterRun = meter?.open({ budgetUsd: route.budgetUsd, ask: info => askOwner(task, agent, info, 'step') });
+      const meterRun = meter && !usesThirdPartyProvider() ? meter.open({ budgetUsd: route.budgetUsd, ask: info => askOwner(task, agent, info, 'step') }) : null;
       try {
         const res = await runner({
           agent, system, prompt, cwd, model: route.model, effort: route.effort, fallback: route.fallback, budgetUsd: route.budgetUsd,
           skills: skillHints(agent, facts).length > 0,
+          denyRead: [store.stateDir ? store.stateDir(root) : `${root}/.floorhands`],
           ...(meterRun ? { meter: meterRun } : {}),
           onEvent: ev => {
             const input = cap(ev.input);
@@ -208,6 +214,8 @@ export function createOrchestrator({ root, roster, store, runner, wt, emit = () 
         throw e;
       } finally {
         meterRun?.close();
+        // A question this run asked and the owner never answered is moot once the run has ended.
+        asking.get(task.id)?.decide({ decision: 'stop', by: 'run-ended' });
         tell({ type: 'agent', taskId, agent: agent.id, phase: 'end' });
       }
     };
@@ -240,11 +248,17 @@ export function createOrchestrator({ root, roster, store, runner, wt, emit = () 
           left = remaining();
         }
         if (agent.tier !== 'read' && !task.worktree) save(task, { worktree: await wt.createWorktree(root, task.id) });
-        // A builder can rewrite package.json scripts; the tester would then run agent-written code as `npm test`. Refuse that step.
-        if (agent.tier === 'test' && task.worktree && wt.scriptsChanged && await wt.scriptsChanged(task.worktree)) {
+        // A builder can change what `npm test` runs: package.json scripts, package manager config or test-runner config. Then the
+        // tester's step is skipped. (Test files themselves still run, inside the sandbox, which is the real containment.)
+        let redefined = [];
+        if (agent.tier === 'test' && task.worktree) {
+          if (wt.scriptsChanged && await wt.scriptsChanged(task.worktree)) redefined.push('package.json');
+          try { if (wt.changedFiles && wt.changesTestDefinition) redefined.push(...wt.changesTestDefinition(await wt.changedFiles(root, task.worktree))); } catch { /* no extra check */ }
+        }
+        if (redefined.length) {
           step.status = 'skipped';
-          step.output = 'Skipped: the package.json scripts changed on this branch, and floorhands does not run scripts an agent wrote. Read the diff, then run the tests yourself.';
-          task.riskFlags = [...(task.riskFlags ?? []), { flag: 'test-skipped-scripts-changed', path: 'package.json' }];
+          step.output = `Skipped: this branch changed how the tests run (${redefined.slice(0, 5).join(', ')}), so floorhands did not run them. Read the diff, then run the tests yourself.`;
+          task.riskFlags = [...(task.riskFlags ?? []), ...redefined.slice(0, 10).map(p => ({ flag: 'test-skipped-scripts-changed', path: p }))];
           current = null;
           save(task);
           continue;
@@ -295,7 +309,7 @@ export function createOrchestrator({ root, roster, store, runner, wt, emit = () 
           worktree = task.worktree;
         }
       }
-      save(task, { status: 'failed', error, worktree });
+      save(task, { status: 'failed', error: redact(error), worktree });
     }
   }
 
