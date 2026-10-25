@@ -39,27 +39,67 @@ export function estimateInputTokens(bytes, observed) {
   return Math.ceil(bytes / ratio);
 }
 
-// Reads token usage out of a streamed (SSE) or plain JSON Messages API response.
-export function usageFrom(text, fallbackModel) {
+// Reads token usage out of a streamed (SSE) or plain JSON Messages API response as it arrives. SSE is parsed line by line and only the
+// latest usage is kept, so a long stream is never truncated (the output count comes in the final message_delta).
+export function usageTracker(contentType = '') {
   const usage = {};
-  let model = fallbackModel;
+  let model = null, line = '', json = '', isJson = !/event-stream/i.test(contentType), decided = !!contentType;
   const take = (u = {}) => {
     for (const k of ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens']) if (Number.isFinite(u[k])) usage[k] = u[k];
     if (Number.isFinite(u.cache_creation?.ephemeral_1h_input_tokens)) usage.cache_creation_1h = u.cache_creation.ephemeral_1h_input_tokens;
+    if (typeof u.speed === 'string') usage.speed = u.speed;
   };
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith('{')) {
-    try { const j = JSON.parse(trimmed); take(j.usage); if (j.model) model = j.model; } catch { /* not JSON */ }
-    return { usage, model };
-  }
-  for (const line of text.split('\n')) {
-    if (!line.startsWith('data:')) continue;
+  const onLine = l => {
+    if (!l.startsWith('data:')) return;
     let j;
-    try { j = JSON.parse(line.slice(5)); } catch { continue; }
+    try { j = JSON.parse(l.slice(5)); } catch { return; }
     if (j.type === 'message_start') { take(j.message?.usage); if (j.message?.model) model = j.message.model; }
     if (j.type === 'message_delta') take(j.usage);
-  }
-  return { usage, model };
+  };
+  return {
+    feed(chunk) {
+      if (!decided) { isJson = chunk.trimStart().startsWith('{'); decided = true; }
+      if (isJson) { if (json.length < 64 * 1024 * 1024) json += chunk; return; }
+      line += chunk;
+      let i;
+      while ((i = line.indexOf('\n')) >= 0) { onLine(line.slice(0, i).replace(/\r$/, '')); line = line.slice(i + 1); }
+      if (line.length > 4 * 1024 * 1024) line = ''; // a single line this long is not an event we need
+    },
+    result(fallbackModel) {
+      if (isJson) {
+        try { const j = JSON.parse(json); take(j.usage); if (j.model) model = j.model; } catch { /* not JSON */ }
+      } else if (line) onLine(line);
+      return { usage: { ...usage }, model: model ?? fallbackModel };
+    },
+  };
+}
+
+// For tests and one-off use: usage from a whole response text.
+export function usageFrom(text, fallbackModel) {
+  const t = usageTracker(text.trimStart().startsWith('{') ? 'application/json' : 'text/event-stream');
+  t.feed(text);
+  return t.result(fallbackModel);
+}
+
+// Images and documents are billed by pixels and pages, not bytes: they are counted separately with a generous fixed bound each, and
+// their base64 bytes are left out of the byte-based estimate.
+export const IMAGE_TOKENS_MAX = 8_000;
+export const DOCUMENT_TOKENS_MAX = 150_000;
+export function mediaOf(body) {
+  const out = { images: 0, documents: 0, bytes: 0 };
+  const walk = v => {
+    if (Array.isArray(v)) { for (const x of v) walk(x); return; }
+    if (!v || typeof v !== 'object') return;
+    if (v.type === 'image' || v.type === 'document') {
+      out[v.type === 'image' ? 'images' : 'documents']++;
+      if (typeof v.source?.data === 'string') out.bytes += v.source.data.length;
+      return;
+    }
+    if (Array.isArray(v.content)) walk(v.content);
+  };
+  walk(body?.system);
+  for (const m of body?.messages ?? []) walk(m?.content);
+  return out;
 }
 
 export function createMeter({ upstream = defaultUpstream(), request = (upstream.protocol === 'https:' ? https.request : http.request), idleMs = UPSTREAM_IDLE_MS,
@@ -84,22 +124,27 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
     res.end(JSON.stringify({ type: 'error', error: { type, message } }));
   };
 
-  // Decide whether this request may go, possibly with a lower max_tokens, possibly after asking the owner. Returns the body to send,
-  // or null when the owner stopped the step.
-  async function admit(run, body, bytes) {
+  // Decide whether this request may go, possibly with a lower max_tokens, possibly after asking the owner. Returns what to send, or
+  // null when the owner stopped the step. The affordability check and the reservation happen in one synchronous step (no await in
+  // between), so requests that were waiting on the same answer cannot all spend the same headroom.
+  async function admit(run, body, inputTokens) {
+    const opts = { fast: body.speed === 'fast' };
     for (;;) {
-      const inputTokens = estimateInputTokens(bytes, run.observed);
       const maxTokens = Number.isInteger(body.max_tokens) && body.max_tokens > 0 ? body.max_tokens : 4096;
       const left = run.budgetUsd - run.spentUsd - run.reservedUsd;
-      const afford = affordableOutput(body.model, inputTokens, left);
-      if (afford >= maxTokens) return { body, reserve: worstCaseCost(body.model, inputTokens, maxTokens), inputTokens };
-      if (afford >= MIN_OUTPUT_TOKENS) {
-        run.clamped++;
-        return { body: { ...body, max_tokens: afford }, reserve: worstCaseCost(body.model, inputTokens, afford), inputTokens };
+      const afford = affordableOutput(body.model, inputTokens, left, opts);
+      let send = null;
+      if (afford >= maxTokens) send = body;
+      else if (afford >= MIN_OUTPUT_TOKENS) { send = { ...body, max_tokens: afford }; run.clamped++; }
+      if (send) {
+        const reserve = worstCaseCost(body.model, inputTokens, send.max_tokens ?? maxTokens, opts);
+        run.reservedUsd += reserve;
+        run.started++;
+        return { body: send, reserve };
       }
       // Ask once per run at a time: a retried or parallel request waits for the same answer.
       if (!run.pending) {
-        const wanted = worstCaseCost(body.model, inputTokens, Math.min(maxTokens, 32_000));
+        const wanted = worstCaseCost(body.model, inputTokens, Math.min(maxTokens, 32_000), opts);
         const info = { spentUsd: round(run.spentUsd), budgetUsd: round(run.budgetUsd), neededUsd: round(Math.max(0.01, wanted - Math.max(0, left))), model: body.model ?? null };
         run.pending = (async () => {
           run.emit('pause');
@@ -113,21 +158,55 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
     }
   }
 
+  // Exact input tokens from the API's free count endpoint, used when a request carries images or documents (billed by pixels and
+  // pages, so bytes say little). Falls back to the fixed per-block bound when counting is not available.
+  async function countTokens(target, headers, body) {
+    const url = new URL(target.href);
+    url.pathname = url.pathname.replace(/\/v1\/messages$/, '/v1/messages/count_tokens');
+    url.search = '';
+    const payload = Buffer.from(JSON.stringify({ model: body.model, messages: body.messages, ...(body.system ? { system: body.system } : {}), ...(body.tools ? { tools: body.tools } : {}) }));
+    return new Promise(resolve => {
+      const r = request(url, { method: 'POST', headers: { ...headers, 'content-length': String(payload.length) } }, res => {
+        let t = '';
+        res.on('data', d => { if (t.length < 65536) t += d; });
+        res.on('end', () => { try { const n = JSON.parse(t).input_tokens; resolve(res.statusCode === 200 && Number.isFinite(n) ? n : null); } catch { resolve(null); } });
+      });
+      r.setTimeout(30_000, () => r.destroy());
+      r.on('error', () => resolve(null));
+      r.end(payload);
+    });
+  }
+
   async function handle(run, req, res, rest, raw) {
-    // Build the target from the fixed upstream and pin it: a path like "//evil.example/x" must never resolve to another host
-    // (the CLI's credentials travel with every request).
+    // Build the target from the fixed upstream and pin it: a path like "//evil.example/x" must never resolve to another host, and no
+    // dot segment may change the path after it was checked (the CLI's credentials travel with every request).
     if (!rest.startsWith('/') || rest.startsWith('//') || rest.includes('\\')) return fail(res, 400, 'floorhands meter: bad path', 'invalid_request_error');
-    const target = new URL(upstream.href);
     const q = rest.indexOf('?');
-    target.pathname = upstream.pathname.replace(/\/$/, '') + (q < 0 ? rest : rest.slice(0, q));
+    const pathPart = q < 0 ? rest : rest.slice(0, q);
+    const prefix = upstream.pathname.replace(/\/$/, '');
+    const target = new URL(upstream.href);
+    target.pathname = prefix + pathPart;
     target.search = q < 0 ? '' : rest.slice(q);
-    if (target.protocol !== upstream.protocol || target.host !== upstream.host) return fail(res, 400, 'floorhands meter: bad upstream', 'invalid_request_error');
-    const isMessages = req.method === 'POST' && /^\/v1\/messages(\?|$)/.test(rest);
-    let send = raw, reserve = 0, model = null, inputTokens = 0;
+    if (target.protocol !== upstream.protocol || target.host !== upstream.host || target.pathname !== prefix + pathPart) {
+      return fail(res, 400, 'floorhands meter: bad path', 'invalid_request_error');
+    }
+    const isMessages = req.method === 'POST' && pathPart === '/v1/messages';
+    const headers = {};
+    for (const [k, v] of Object.entries(req.headers)) if (!DROP_HEADERS.has(k.toLowerCase())) headers[k] = v;
+    headers['accept-encoding'] = 'identity'; // the meter reads usage from the response, so it must not be compressed
+    let send = raw, reserve = 0, model = null, inputTokens = 0, sentMax;
+    let released = false;
+    const release = () => { if (!released) { released = true; run.reservedUsd = Math.max(0, run.reservedUsd - reserve); } };
     if (isMessages) {
       let body;
       try { body = JSON.parse(raw.toString('utf8')); } catch { return fail(res, 400, 'floorhands meter: request body is not JSON', 'invalid_request_error'); }
-      const admitted = await admit(run, body, raw.length);
+      const media = mediaOf(body);
+      inputTokens = estimateInputTokens(raw.length - media.bytes, run.observed) + media.images * IMAGE_TOKENS_MAX + media.documents * DOCUMENT_TOKENS_MAX;
+      if (media.images + media.documents > 0) {
+        const exact = await countTokens(target, headers, body);
+        if (exact !== null) inputTokens = Math.ceil(exact * 1.05);
+      }
+      const admitted = await admit(run, body, inputTokens);
       if (!admitted) {
         run.stopped = true;
         // 400 is not retried by the CLI: the step ends with this message.
@@ -135,41 +214,47 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
       }
       reserve = admitted.reserve;
       model = admitted.body.model;
-      inputTokens = admitted.inputTokens;
-      run.reservedUsd += reserve;
+      sentMax = admitted.body.max_tokens;
       if (admitted.body !== body) send = Buffer.from(JSON.stringify(admitted.body));
     }
-    const headers = {};
-    for (const [k, v] of Object.entries(req.headers)) if (!DROP_HEADERS.has(k.toLowerCase())) headers[k] = v;
     headers['content-length'] = String(send.length);
-    headers['accept-encoding'] = 'identity'; // the meter reads usage from the response, so it must not be compressed
     const t0 = Date.now();
     let firstByte = null, bytesOut = 0;
-    const trace = (what, extra = {}) => log?.(JSON.stringify({ run: run.id.slice(0, 6), what, path: rest.slice(0, 40), ms: Date.now() - t0, firstByteMs: firstByte, bytesOut, ...extra }));
+    const trace = (what, extra = {}) => log?.(JSON.stringify({ run: run.id.slice(0, 6), what, path: pathPart.slice(0, 40), ms: Date.now() - t0, firstByteMs: firstByte, bytesOut, maxTokens: sentMax, ...extra }));
     req.on('close', () => { if (!res.writableEnded) trace('client-closed-early'); });
+    // Charges what the API reported so far. Called once: at the end of the response, or when it is cut (a cut stream is billed for
+    // its input and any output already produced).
+    let charged = false;
+    const charge = (tracker, status) => {
+      if (charged) return;
+      charged = true;
+      release();
+      if (!isMessages || !tracker || (status ?? 500) >= 400) return;
+      const { usage, model: ran } = tracker.result(model);
+      if (!Object.keys(usage).length) return;
+      run.spentUsd += costOf(ran, usage, { fast: usage.speed === 'fast' });
+      run.requests++;
+      const promptTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+      if (promptTokens > 0) run.observed = { bytes: send.length, tokens: promptTokens };
+      run.lastEstimate = { estimated: inputTokens, actual: promptTokens };
+    };
+    let tracker = null, status = null;
     const up = request(target, { method: req.method, headers }, r => {
-      const outHeaders = { ...r.headers };
-      res.writeHead(r.statusCode ?? 502, outHeaders);
-      let text = '';
-      r.on('data', d => { if (firstByte === null) firstByte = Date.now() - t0; bytesOut += d.length; if (isMessages && text.length < 8 * 1024 * 1024) text += d.toString('utf8'); res.write(d); });
-      r.on('end', () => {
-        res.end();
-        trace('done', { status: r.statusCode, maxTokens: isMessages ? JSON.parse(send.toString('utf8')).max_tokens : undefined });
-        if (!isMessages) return;
-        run.reservedUsd = Math.max(0, run.reservedUsd - reserve);
-        if ((r.statusCode ?? 500) >= 400) return;
-        const { usage, model: ran } = usageFrom(text, model);
-        const usd = costOf(ran, usage);
-        run.spentUsd += usd;
-        run.requests++;
-        const promptTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
-        if (promptTokens > 0) run.observed = { bytes: send.length, tokens: promptTokens };
-        run.lastEstimate = { estimated: inputTokens, actual: promptTokens };
+      status = r.statusCode;
+      res.writeHead(r.statusCode ?? 502, { ...r.headers });
+      tracker = isMessages ? usageTracker(String(r.headers['content-type'] ?? '')) : null;
+      r.on('data', d => {
+        if (firstByte === null) firstByte = Date.now() - t0;
+        bytesOut += d.length;
+        tracker?.feed(d.toString('utf8'));
+        if (!res.destroyed) res.write(d);
       });
-      r.on('error', e => { trace('upstream-error', { error: e.code ?? e.message }); run.reservedUsd = Math.max(0, run.reservedUsd - reserve); res.destroy(); });
+      r.on('end', () => { res.end(); trace('done', { status: r.statusCode }); charge(tracker, status); });
+      r.on('aborted', () => { trace('upstream-aborted'); charge(tracker, status); res.destroy(); });
+      r.on('error', e => { trace('upstream-error', { error: e.code ?? e.message }); charge(tracker, status); res.destroy(); });
     });
     up.setTimeout(idleMs, () => { trace('upstream-idle-timeout'); up.destroy(Object.assign(new Error('upstream idle'), { code: 'IDLE_TIMEOUT' })); });
-    up.on('error', e => { run.reservedUsd = Math.max(0, run.reservedUsd - reserve); fail(res, 502, `floorhands meter: upstream unreachable (${e.code ?? e.message})`); });
+    up.on('error', e => { charge(tracker, status); fail(res, 502, `floorhands meter: upstream unreachable (${e.code ?? e.message})`); });
     up.end(send);
   }
 
@@ -188,7 +273,7 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
       const listeners = { pause: new Set(), resume: new Set() };
       const run = {
         id, url: `${base}/r/${id}`, budgetUsd, spentUsd: 0, reservedUsd: 0, requests: 0, clamped: 0, stopped: false,
-        observed: null, pending: null, lastEstimate: null, ask,
+        observed: null, pending: null, lastEstimate: null, ask, started: 0,
         emit: ev => { for (const fn of listeners[ev]) { try { fn(); } catch { /* listener errors never break the meter */ } } },
         on: (ev, fn) => { listeners[ev].add(fn); return () => listeners[ev].delete(fn); },
         close: () => { runs.delete(id); },

@@ -349,3 +349,32 @@ test('a run stopped by its spending cap fails with a clear message and still rep
   assert.match(err.message, /spending cap of \$2/);
   assert.equal(err.metrics.costUsd, 2.01);
 });
+
+test('review #3: a run whose model output did not go through the spending guard is stopped at once', async () => {
+  const spawnFn = fakeSpawn({ lines: [J({ type: 'system', subtype: 'init' }), J({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } }), ok('x')] });
+  const meter = { url: 'http://127.0.0.1:1/r/x', started: 0, on: () => () => {}, report: () => ({}) };
+  const err = await runAgent(base({ spawnFn, meter })).catch(e => e);
+  assert.match(err.message, /did not go through the spending guard/);
+  assert.equal(err.metrics.meterBypassed, true);
+  assert.ok(spawnFn.calls[0].child.signals.includes('SIGKILL'));
+  const fine = { ...meter, started: 1 };
+  assert.equal((await runAgent(base({ spawnFn: fakeSpawn({ lines: [J({ type: 'assistant', message: { content: [] } }), ok('y')] }), meter: fine }))).text, 'y');
+});
+
+test('review #3: Bedrock, Vertex and Foundry are recognised (the guard cannot see their traffic)', async () => {
+  const { usesThirdPartyProvider } = await import('../server/runner.js');
+  assert.equal(usesThirdPartyProvider({}), false);
+  assert.equal(usesThirdPartyProvider({ CLAUDE_CODE_USE_BEDROCK: '1' }), true);
+  assert.equal(usesThirdPartyProvider({ CLAUDE_CODE_USE_VERTEX: 'true' }), true);
+  assert.equal(usesThirdPartyProvider({ CLAUDE_CODE_USE_FOUNDRY: '0' }), false);
+});
+
+test('with the guard on, the CLI cap is left off; without it, the CLI cap is used', async () => {
+  const s1 = fakeSpawn({ lines: [ok('x')] });
+  await runAgent(base({ spawnFn: s1, budgetUsd: 2, meter: { url: 'http://127.0.0.1:1/r/x', started: 1, on: () => () => {}, report: () => ({}) } }));
+  assert.ok(!s1.calls[0].args.includes('--max-budget-usd'));
+  assert.equal(s1.calls[0].opts.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:1/r/x');
+  const s2 = fakeSpawn({ lines: [ok('x')] });
+  await runAgent(base({ spawnFn: s2, budgetUsd: 2 }));
+  assert.ok(s2.calls[0].args.includes('--max-budget-usd'));
+});

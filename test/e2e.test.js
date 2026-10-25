@@ -5,14 +5,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { startFakeApi } from '../scripts/fake-anthropic.mjs';
 
 const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(REPO, 'bin', 'floorhands');
 const project = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-e2e-')));
 const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-e2e-home-')));
 const plain = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-e2e-plain-')));
+// The server's spending guard forwards to this fake API, so every agent run goes CLI -> guard -> API like the real thing.
+const fakeApi = await startFakeApi();
 const env = {
   ...process.env,
+  ANTHROPIC_BASE_URL: fakeApi.url,
+  ANTHROPIC_API_KEY: 'sk-fake-e2e',
   FLOORHANDS_PORT: String(48000 + Math.floor(Math.random() * 900)),
   FLOORHANDS_CLAUDE_BIN: path.join(REPO, 'scripts', 'fake-claude.mjs'),
   FLOORHANDS_HOME: home,
@@ -64,6 +69,7 @@ after(() => {
   try { fh('stop'); } catch { /* ignore */ }
   try { execFileSync(process.execPath, [BIN, 'stop'], { cwd: plain, env: penv }); } catch { /* ignore */ }
   for (const d of [project, home, plain]) fs.rmSync(d, { recursive: true, force: true });
+  fakeApi.close();
 });
 
 test('a task flows plan -> build in a worktree -> review -> approval -> merge', async () => {
@@ -77,8 +83,9 @@ test('a task flows plan -> build in a worktree -> review -> approval -> merge', 
   assert.deepEqual(t.steps.map(s => s.metrics.model), ['sonnet', 'opus']);
   assert.equal(t.planner.route.model, 'opus');
   assert.ok(t.totals.costUsd > 0 && t.totals.runs === 3);
-  // The fake CLI never calls the API, so the spending guard saw nothing: that is flagged, never silently counted as $0.
-  assert.ok(t.steps.every(s => s.metrics.meterRequests === 0 && s.metrics.meterBypassed === true));
+  // Every run went through the spending guard to the (fake) API, and the guard's own figure is what was counted.
+  assert.ok(t.steps.every(s => s.metrics.meterRequests === 1 && s.metrics.meteredUsd > 0 && !s.metrics.meterBypassed));
+  assert.ok(fakeApi.requests.some(r => r.path.startsWith('/v1/messages') && r.body.model === 'claude-sonnet-5-5'), 'the builder asked for Sonnet');
   assert.match(t.planRaw, /"steps"/);
   assert.match((await call('GET', `/api/tasks/${id}/diff`)).text, /FLOORHANDS_DEMO\.md/);
   assert.equal(fs.existsSync(path.join(project, 'FLOORHANDS_DEMO.md')), false, 'working copy untouched before approval');
