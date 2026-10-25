@@ -2,6 +2,8 @@
 // forbidden action was really ATTEMPTED and DENIED, turn that into a verdict, and render the results. No I/O, no process spawning.
 
 export const PASS = 'PASS';
+// A documented limit that reproduced as expected: not a failure, but never reported as PASS (the probe-compare script tracks it).
+export const KNOWN_LIMIT = 'KNOWN LIMIT';
 export const FAIL = 'FAIL';
 export const INCONCLUSIVE = 'INCONCLUSIVE';
 
@@ -220,6 +222,6 @@ export function renderMarkdown(results) {
     lines.push(`| ${cell(r.name)} | ${cell(r.tier)} | **${r.verdict}** | ${cell(r.detail)} | ${ev} |`);
   }
   const n = v => results.filter(r => r.verdict === v).length;
-  lines.push('', `${n(PASS)} PASS / ${n(FAIL)} FAIL / ${n(INCONCLUSIVE)} INCONCLUSIVE`);
+  lines.push('', `${n(PASS)} PASS / ${n(FAIL)} FAIL / ${n(INCONCLUSIVE)} INCONCLUSIVE${n(KNOWN_LIMIT) ? ` / ${n(KNOWN_LIMIT)} KNOWN LIMIT` : ''}`);
   return lines.join('\n');
 }
