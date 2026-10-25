@@ -44,7 +44,8 @@ export function compare(current, baselines) {
   }
   const ran = new Set((current?.results ?? []).map(r => r.name));
   const missing = [...base.keys()].filter(n => base.get(n) === PASS && !ran.has(n));
-  return { regressions, warnings, fixed, missing, ok: regressions.length === 0 };
+  // A probe that passed in the baseline and did not run at all is a regression too: a probe silently dropped proves nothing.
+  return { regressions, warnings, fixed, missing, ok: regressions.length === 0 && missing.length === 0 };
 }
 
 const isMain = (() => { try { return fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
@@ -55,7 +56,7 @@ if (isMain) {
   const current = read(cur);
   const r = compare(current, bases.map(read));
   console.log(`claude ${current.claudeVersion ?? '?'}: ${current.results?.length ?? 0} probe results compared with ${bases.length} baseline file(s)`);
-  for (const [title, list] of [['REGRESSIONS', r.regressions], ['warnings', r.warnings], ['now passing', r.fixed], ['not run this time (filtered with --only?)', r.missing]]) {
+  for (const [title, list] of [['REGRESSIONS', r.regressions], ['MISSING (passed in the baseline, not run now)', r.missing], ['warnings', r.warnings], ['now passing', r.fixed]]) {
     if (list.length) console.log(`\n${title}:\n${list.map(l => `  - ${l}`).join('\n')}`);
   }
   process.exit(r.ok ? 0 : 1);

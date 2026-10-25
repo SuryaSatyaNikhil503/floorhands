@@ -711,7 +711,7 @@ test('a test step is skipped when a builder changed the package.json scripts', a
   const done = store.getTask(s.root, t.id);
   assert.deepEqual(s.calls.map(c => c.agent), ['arch', 'fe']);
   assert.equal(done.steps[1].status, 'skipped');
-  assert.match(done.steps[1].output, /does not run scripts an agent wrote/);
+  assert.match(done.steps[1].output, /changed how the tests run \(package\.json\)/);
   assert.ok(done.riskFlags.some(f => f.flag === 'test-skipped-scripts-changed'));
   assert.equal(done.status, 'awaiting_approval');
 });
@@ -847,4 +847,59 @@ test('when the whole task reaches its cap, the owner is asked before the next st
   assert.equal(done.status, 'awaiting_approval');
   assert.equal(s.calls.length, 3);
   assert.equal(meter.runs[2].budgetUsd, 1.8, 'the last step gets what is left of $1 + $2 allowed');
+});
+
+
+test('review #8: a changed .npmrc or test-runner config also skips the tester', async () => {
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'e2e', task: 'Test' }]),
+    wtOverrides: { scriptsChanged: async () => false, changedFiles: async () => ['src/a.js', '.npmrc', 'vitest.config.ts'], changesTestDefinition: (await import('../server/worktree.js')).changesTestDefinition } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.steps[1].status, 'skipped');
+  assert.match(done.steps[1].output, /\.npmrc, vitest\.config\.ts/);
+  assert.deepEqual(s.calls.map(c => c.agent), ['arch', 'fe']);
+});
+
+test('review #8: an ordinary source and test change still gets tested', async () => {
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'e2e', task: 'Test' }]),
+    wtOverrides: { scriptsChanged: async () => false, changedFiles: async () => ['src/a.js', 'test/a.test.js'], changesTestDefinition: (await import('../server/worktree.js')).changesTestDefinition } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.deepEqual(s.calls.map(c => c.agent), ['arch', 'fe', 'e2e']);
+});
+
+test('review #10: a budget question left open when its run ends is cancelled and does not revive the task', async () => {
+  const meter = fakeMeter();
+  const s = setup({ roster: ranged, meter, planText: plan([{ agent: 'fe', task: 'A' }]),
+    // The run asks, then ends on its own (the CLI exits) without waiting for the answer.
+    onRun: async o => { if (o.agent.id === 'fe') { o.meter.ask({ spentUsd: 2, budgetUsd: 2, neededUsd: 1 }); throw new Error('cli exited'); } } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'failed');
+  assert.equal(done.budgetRequest, null);
+  assert.equal(done.budgetDecisions.at(-1).by, 'run-ended');
+  assert.throws(() => s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 1 }), /not waiting/);
+});
+
+test('review #11: an allowance that rounds to zero cents is refused, not read as stop', async () => {
+  const meter = fakeMeter();
+  let resolveAsk;
+  const s = setup({ roster: ranged, meter, planText: plan([{ agent: 'fe', task: 'A' }]),
+    onRun: async o => { if (o.agent.id === 'fe') { const a = await o.meter.ask({ spentUsd: 2, budgetUsd: 2, neededUsd: 1 }); resolveAsk = a; if (a.stop) throw new Error('stopped'); } } });
+  const t = store.createTask(s.root, 'x');
+  const running = s.orch.run(t.id);
+  await until(() => store.getTask(s.root, t.id).status === 'needs_budget');
+  assert.throws(() => s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 0.004 }), /at least 0\.01/);
+  s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 0.015 });
+  await running;
+  assert.deepEqual(resolveAsk, { allowUsd: 0.02 });
+});
+
+test('review #9: a failure message is redacted before it is stored', async () => {
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }]), failOn: 'fe', failWith: 'claude exited 1: token="ghp_' + 'a'.repeat(36) + '"' });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.doesNotMatch(store.getTask(s.root, t.id).error, /ghp_a/);
 });

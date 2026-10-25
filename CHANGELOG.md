@@ -30,6 +30,16 @@ The right model for each step, spending caps, a record of what every run cost, a
 - The system prompt reaches the CLI through `--append-system-prompt-file`, as an owner-only file deleted after the run, never on the command line.
 - `floorhands start` says to open the page with `floorhands open`, because the page needs the run's token.
 
+### Fixed after review
+
+An independent review of the pull request disproved two of its claims, with reproductions. Fixed before merge:
+- The merge on Approve ran the owner's own hooks, which can load repository files an agent changed (a commitlint config, for example) and so run agent-written code outside the sandbox. Approve now runs no hooks at all.
+- Requests waiting on the same budget question could all spend the same headroom (about 3x over in the reproduction). The check and the reservation now happen in one step.
+- With Bedrock, Vertex or Foundry, model traffic bypassed the guard and nothing capped it. The CLI's cap is used for them, and a run whose output did not go through the guard is stopped at once.
+- A cut stream released its reservation twice and cost nothing; usage past the first 8 MB of a stream was lost; fast mode, images and documents were not in the worst case; dot segments in a path reached unmetered endpoints. All fixed.
+- A sandboxed script could read the server's access token in `.floorhands/server.json` by its absolute path. Reads of that folder are denied to tools and scripts. New probes: loopback is unreachable from the sandbox, and the state folder is unreadable.
+- The tester is also skipped when `.npmrc` or a test-runner config changed; failure messages are redacted; an unanswered budget question is cancelled when its run ends; an allowance that rounds to $0 is refused; a probe that disappears from a run fails the gate.
+
 ### Security
 
 - A per-run access token protects every `/api/` route except `/api/health`.

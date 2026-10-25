@@ -55,6 +55,8 @@ const NEVER = [
 const GIT_FLAG_DENIES = ['git * --output*', 'git * --no-index*', 'git * --ext-diff*', 'git * --textconv*'];
 // Secret files the Read/Edit tools must never touch. The Bash sandbox has its own read-deny list (SANDBOX_READ_DENY) for build/test.
 const SECRET_READS = ['**/.env*', '**/*.pem',
+  // floorhands' own state: server.json holds the run's access token (which can approve budgets and start tasks).
+  '**/.floorhands/**',
   // Home-directory credential stores that are not otherwise denied. A read agent (no sandbox) could Read these directly; add them so
   // the Read tool refuses (spike: cred-read-tier-denied, run with the same rules re-expressed for a throwaway fake home).
   '~/.aws/**', '~/.ssh/**', '~/.config/gh/**', '~/.config/gcloud/**', '~/.npmrc', '~/.netrc', '~/.docker/config.json',
@@ -113,6 +115,13 @@ export const BASH_SANDBOX_SETTINGS = deepFreeze({
   },
 });
 
+function sandboxSettings(denyRead) {
+  const extra = (Array.isArray(denyRead) ? denyRead : []).filter(p => typeof p === 'string' && p.startsWith('/') && !p.includes('\0'));
+  if (!extra.length) return { ...AGENT_SESSION_SETTINGS, ...BASH_SANDBOX_SETTINGS };
+  const sb = BASH_SANDBOX_SETTINGS.sandbox;
+  return { ...AGENT_SESSION_SETTINGS, sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: [...sb.filesystem.denyRead, ...extra] } } };
+}
+
 export const TIERS = deepFreeze({
   read: { tools: READ_TOOLS, allow: [...FILE_READ, ...GIT_READ.map(bash)], sandbox: true },
   build: { tools: [...READ_TOOLS, 'Edit', 'Write'], allow: [...FILE_READ, EDIT_IN_WORKDIR, ...GIT_READ.map(bash), ...BUILD_CMDS.map(bash)], sandbox: true },
@@ -140,7 +149,9 @@ const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // they end up in argv.
 // `skills: false` (the default) also turns off the owner's skills: their listing alone was about 7k tokens per run, and an agent
 // only ever uses the few skills its roster entry hints at for this project. The orchestrator passes `skills: true` only then.
-export function buildClaudeArgs({ agent, system, systemFile, model, effort, fallback, budgetUsd, skills = false }) {
+// `denyRead`: extra absolute paths the sandbox must not let scripts read (the orchestrator passes the project's .floorhands folder,
+// which an unprefixed sandbox rule cannot name).
+export function buildClaudeArgs({ agent, system, systemFile, model, effort, fallback, budgetUsd, skills = false, denyRead = [] }) {
   if (!agent || !Object.hasOwn(TIERS, agent.tier)) throw new Error(`unknown tier "${agent?.tier}"`);
   if (systemFile !== undefined) {
     if (typeof systemFile !== 'string' || !systemFile.startsWith('/')) throw new Error('system prompt file must be an absolute path');
@@ -170,7 +181,7 @@ export function buildClaudeArgs({ agent, system, systemFile, model, effort, fall
     // The working directory, environment and git status go into the first message instead of the system prompt, so the system
     // prompt is the same in every folder and can be shared through the prompt cache.
     '--exclude-dynamic-system-prompt-sections',
-    '--settings', JSON.stringify(tier.sandbox ? { ...AGENT_SESSION_SETTINGS, ...BASH_SANDBOX_SETTINGS } : AGENT_SESSION_SETTINGS),
+    '--settings', JSON.stringify(tier.sandbox ? sandboxSettings(denyRead) : AGENT_SESSION_SETTINGS),
   ];
   if (!skills) args.push('--disable-slash-commands');
   if (model) args.push('--model', model);
