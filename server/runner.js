@@ -54,6 +54,11 @@ export function agentEnv(env = process.env) {
   return out;
 }
 
+// Bedrock, Vertex and Foundry are reached by the CLI directly, not through ANTHROPIC_BASE_URL, so the spending guard cannot see that
+// traffic. With one of them configured, the orchestrator keeps the CLI's own --max-budget-usd on instead of the guard.
+const THIRD_PARTY = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'];
+export const usesThirdPartyProvider = (env = process.env) => THIRD_PARTY.some(k => /^(1|true|yes|on)$/i.test(String(env[k] ?? '').trim()));
+
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 // The run report kept per step: what it cost and which model actually ran (an alias such as "opus" moves, and a fallback can switch
@@ -83,12 +88,12 @@ function writeSystemFile(system) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-sys-'));
   fs.chmodSync(dir, 0o700);
   const file = path.join(dir, 'system.md');
-  fs.writeFileSync(file, system, { mode: 0o600, flag: 'wx' });
+  try { fs.writeFileSync(file, system, { mode: 0o600, flag: 'wx' }); } catch (e) { fs.rmSync(dir, { recursive: true, force: true }); throw e; }
   return { file: fs.realpathSync(file), remove: () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
 }
 
 export function runAgent({ agent, system, prompt, cwd, onEvent = () => {}, spawnFn = spawn, claudeBin = 'claude', timeoutMs = 15 * 60 * 1000,
-  model, effort, fallback, budgetUsd, skills = false, meter = null }) {
+  model, effort, fallback, budgetUsd, skills = false, meter = null, denyRead = [] }) {
   return new Promise((resolve, reject) => {
     const env = agentEnv(process.env);
     if (meter) {
@@ -100,7 +105,7 @@ export function runAgent({ agent, system, prompt, cwd, onEvent = () => {}, spawn
     let child, sys;
     try {
       sys = writeSystemFile(system);
-      child = spawnFn(claudeBin, buildClaudeArgs({ agent, systemFile: sys.file, model, effort, fallback, budgetUsd: meter ? undefined : budgetUsd, skills }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnFn(claudeBin, buildClaudeArgs({ agent, systemFile: sys.file, model, effort, fallback, budgetUsd: meter ? undefined : budgetUsd, skills, denyRead }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       sys?.remove();
       return reject(e);
@@ -137,6 +142,13 @@ export function runAgent({ agent, system, prompt, cwd, onEvent = () => {}, spawn
         const j = JSON.parse(line);
         if (!j || typeof j !== 'object') return;
         const content = j.message?.content;
+        // Tripwire: the agent produced model output, yet the spending guard never admitted a request. Its traffic is going around the
+        // guard, so nothing caps it: stop at once rather than find out from the bill.
+        if (j.type === 'assistant' && meter && meter.started === 0) {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+          done(reject, Object.assign(new Error(`${agent.name} was stopped: its model requests did not go through the spending guard, so its spending was not capped`), { metrics: { meterBypassed: true } }));
+          return;
+        }
         if (j.type === 'assistant' && Array.isArray(content)) {
           for (const b of content) {
             if (!b || typeof b !== 'object') continue;

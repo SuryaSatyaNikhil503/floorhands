@@ -18,6 +18,14 @@ const use = (name, input) => out({ type: 'assistant', message: { content: [{ typ
 const mi = args.indexOf('--model');
 const model = mi >= 0 ? args[mi + 1] : 'default';
 out({ type: 'system', subtype: 'init', tools, model, claude_code_version: '0.0.0-fake' });
+// Like the real CLI, make one model request to ANTHROPIC_BASE_URL when it is set (the spending guard, in front of a fake API in the
+// tests), so the whole chain is exercised. Without it (UI demos) nothing is sent anywhere.
+if (process.env.ANTHROPIC_BASE_URL) {
+  const r = await fetch(`${process.env.ANTHROPIC_BASE_URL}/v1/messages`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY ?? 'fake' },
+    body: JSON.stringify({ model: model === 'default' ? 'claude-haiku-5-5' : `claude-${model}-5-5`, max_tokens: 1000, messages: [{ role: 'user', content: prompt.slice(0, 2000) }] }) });
+  if (!r.ok) { out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: `API ${r.status}: ${(await r.text()).slice(0, 200)}` }); process.exit(1); }
+  await r.text();
+}
 await new Promise(r => setTimeout(r, 150));
 
 let result;

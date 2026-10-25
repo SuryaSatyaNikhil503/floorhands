@@ -127,7 +127,7 @@ export function resolveStep(agent, requested, policy = mergePolicy(), remainingU
     model: c.model,
     effort: c.effort ?? null,
     fallback: c.fallback && c.fallback !== c.model ? c.fallback : null,
-    budgetUsd: Math.round(budgetUsd * 100) / 100,
+    budgetUsd: Math.floor(budgetUsd * 100) / 100, // down, never up: a step must not get more than is left
   };
 }
 
@@ -165,17 +165,22 @@ export const PRICES = Object.freeze([
 ].map(([k, v]) => [k, Object.freeze(v)]));
 const MOST_EXPENSIVE = Object.freeze({ in: 10, out: 50, cacheRead: 1 });
 
-// The longest matching prefix wins, so claude-opus-5-5 is not priced as claude-opus-5.
-export function priceOf(model) {
+// The longest matching prefix wins, so claude-opus-5-5 is not priced as claude-opus-5. Fast mode (speed: "fast") is billed at twice
+// the standard rates.
+export function priceOf(model, { fast = false } = {}) {
   const m = String(model ?? '').toLowerCase();
   let best = null;
   for (const [k, v] of PRICES) if (m.startsWith(k) && (!best || k.length > best[0].length)) best = [k, v];
-  return best ? best[1] : MOST_EXPENSIVE;
+  const p = best ? best[1] : MOST_EXPENSIVE;
+  if (!fast) return p;
+  const f = {};
+  for (const [k, v] of Object.entries(p)) f[k] = k === 'longAbove' ? v : v * 2;
+  return f;
 }
 
 // What a finished request cost, from the usage the API reported.
-export function costOf(model, u) {
-  const p = priceOf(model);
+export function costOf(model, u, opts = {}) {
+  const p = priceOf(model, opts);
   const n = k => (Number.isFinite(u?.[k]) ? u[k] : 0);
   const write1h = n('cache_creation_1h');
   const write5m = Math.max(0, n('cache_creation_input_tokens') - write1h);
@@ -187,15 +192,15 @@ export function costOf(model, u) {
 
 // The most a request can cost before it is sent: every input token billed as a 1-hour cache write (the dearest way to pay for input)
 // and every allowed output token used. If the guard lets a request through only when this fits, a step cannot overshoot its cap.
-export function worstCaseCost(model, inputTokens, maxTokens) {
-  const p = priceOf(model);
+export function worstCaseCost(model, inputTokens, maxTokens, opts = {}) {
+  const p = priceOf(model, opts);
   const long = p.longAbove && inputTokens > p.longAbove;
   return (inputTokens * (long ? p.longIn : p.in) * 2 + maxTokens * (long ? p.longOut : p.out)) / 1e6;
 }
 
 // The output allowance that keeps a request within `remainingUsd`, or 0 when even the input does not fit.
-export function affordableOutput(model, inputTokens, remainingUsd) {
-  const p = priceOf(model);
+export function affordableOutput(model, inputTokens, remainingUsd, opts = {}) {
+  const p = priceOf(model, opts);
   const long = p.longAbove && inputTokens > p.longAbove;
   const left = remainingUsd - (inputTokens * (long ? p.longIn : p.in) * 2) / 1e6;
   return left <= 0 ? 0 : Math.floor((left * 1e6) / (long ? p.longOut : p.out));
