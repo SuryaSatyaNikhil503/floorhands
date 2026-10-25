@@ -1,11 +1,12 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { publicAgent } from './roster.js';
 import { loadNotes } from './notes.js';
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
-const TASK_ROUTE = /^\/api\/tasks\/([^/]+)(?:\/(diff|approve|reject))?$/;
+const TASK_ROUTE = /^\/api\/tasks\/([^/]+)(?:\/(diff|approve|reject|budget))?$/;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const CSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'";
 const MAX_BODY = 64 * 1024;
@@ -21,6 +22,18 @@ export function createHub() {
     emit: ev => { for (const fn of [...fns]) { try { fn(ev); } catch { /* subscriber failed; it removes itself */ } } },
     subscribe: fn => { fns.add(fn); return () => { fns.delete(fn); }; },
   };
+}
+
+// Per-run token (known limit 2 in 0.2.0: anything that could reach the port could start agents). The CLI reads it from the owner-only
+// server.json and opens the page with it in the URL fragment, which browsers never send to a server; the page then sends it as a
+// header. EventSource cannot set headers, so /api/events alone also accepts it as ?t=. The UI's static files and /api/health stay
+// open: they hold no project data, and the CLI uses health to recognise its own server.
+const TOKEN_HEADER = 'x-floorhands-token';
+function tokenOk(expected, given) {
+  if (!expected) return true; // tests and tools that build an app without a token
+  if (typeof given !== 'string' || !given) return false;
+  const a = Buffer.from(expected), b = Buffer.from(given);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 const sameOrigin = (origin, host) => { try { return new URL(origin).host === host; } catch { return false; } };
@@ -41,7 +54,7 @@ function readBody(req) {
   });
 }
 
-export function createApp({ root, roster, store, orchestrator, hub, uiDir, log = console.error }) {
+export function createApp({ root, roster, store, orchestrator, hub, uiDir, log = console.error, token = null, policy = null }) {
   const ui = path.resolve(uiDir);
   const send = (res, code, body, type = 'application/json; charset=utf-8', extra = {}) => {
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra });
@@ -52,9 +65,14 @@ export function createApp({ root, roster, store, orchestrator, hub, uiDir, log =
     try {
       const host = req.headers.host ?? '';
       if (!LOCAL_HOST.test(host)) return send(res, 403, { error: 'forbidden host' });
-      let p;
-      try { p = new URL(req.url, `http://${host}`).pathname; }
+      let p, query;
+      try { const u = new URL(req.url, `http://${host}`); p = u.pathname; query = u.searchParams; }
       catch { return send(res, 400, { error: 'bad request' }); }
+
+      if (p.startsWith('/api/') && p !== '/api/health') {
+        const given = req.headers[TOKEN_HEADER] ?? (p === '/api/events' ? query.get('t') : null);
+        if (!tokenOk(token, given)) return send(res, 401, { error: 'Open this page with "floorhands open" (the link carries a per-run token).' });
+      }
 
       if (req.method === 'POST') {
         const origin = req.headers.origin;
@@ -67,7 +85,10 @@ export function createApp({ root, roster, store, orchestrator, hub, uiDir, log =
 
       if (req.method === 'GET' && p === '/api/state') {
         const { path: notesFile, bytes } = loadNotes(root); // path and size only: the contents never leave the server
-        return send(res, 200, { project: root, roster: { pods: roster.pods, agents: roster.agents.map(publicAgent) }, tasks: store.listTasks(root), notes: { path: notesFile, bytes } });
+        return send(res, 200, {
+          project: root, roster: { pods: roster.pods, agents: roster.agents.map(publicAgent) }, tasks: store.listTasks(root), notes: { path: notesFile, bytes },
+          ...(policy ? { policy: { classes: policy.classes, taskBudgetUsd: policy.taskBudgetUsd, maxConcurrentTasks: policy.maxConcurrentTasks } } : {}),
+        });
       }
 
       if (req.method === 'GET' && p === '/api/events') {
@@ -115,9 +136,31 @@ export function createApp({ root, roster, store, orchestrator, hub, uiDir, log =
           if (Buffer.byteLength(diff) > MAX_DIFF) diff = Buffer.from(diff).subarray(0, MAX_DIFF).toString('utf8').replace(/\uFFFD$/, '') + DIFF_NOTE;
           return send(res, 200, diff, 'text/plain; charset=utf-8');
         }
-        if (req.method === 'POST' && (action === 'approve' || action === 'reject')) {
+        if (req.method === 'POST' && action === 'approve') {
           req.resume();
-          try { await orchestrator[action](id); return send(res, 200, { ok: true }); }
+          try { await orchestrator.approve(id); return send(res, 200, { ok: true }); }
+          catch (e) { return send(res, 409, { error: e.message }); }
+        }
+        if (req.method === 'POST' && action === 'budget') {
+          // The owner's answer when a step or the task reached its spending cap: { decision: "allow", extraUsd } or { decision: "stop" }.
+          let body;
+          try { body = JSON.parse(await readBody(req)); }
+          catch (e) { return send(res, e.tooLarge ? 413 : 400, { error: e.tooLarge ? 'request too large' : 'invalid JSON' }); }
+          if (body === null || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: 'expected an object' });
+          try { orchestrator.decideBudget(id, { decision: body.decision, extraUsd: body.extraUsd }); return send(res, 200, { ok: true }); }
+          catch (e) { return send(res, 409, { error: e.message }); }
+        }
+        if (req.method === 'POST' && action === 'reject') {
+          // Optional body { reason, note }: why the change was rejected, the data that says what to improve.
+          let body = {};
+          try { const raw = await readBody(req); body = raw.trim() ? JSON.parse(raw) : {}; }
+          catch (e) { return send(res, e.tooLarge ? 413 : 400, { error: e.tooLarge ? 'request too large' : 'invalid JSON' }); }
+          if (body === null || typeof body !== 'object' || Array.isArray(body)) body = {};
+          const why = {
+            ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+            ...(typeof body.note === 'string' ? { note: body.note } : {}),
+          };
+          try { await orchestrator.reject(id, why); return send(res, 200, { ok: true }); }
           catch (e) { return send(res, 409, { error: e.message }); }
         }
       }

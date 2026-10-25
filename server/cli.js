@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stateDir } from './store.js';
 import { loadNotes } from './notes.js';
+import { loadPolicy, policyPath } from './models.js';
 import {
   findProjectRoot, readServerInfo, clearServerInfo, isEnabled, setEnabled, ensureExclude, pidAlive, serverUp,
 } from './state.js';
@@ -19,7 +20,12 @@ const HELP = `floorhands — an office of Claude-powered engineering agents.
   floorhands stop                   stop this project's office
   floorhands enable | disable       turn auto-start (Claude Code session hook) on or off for this project
   floorhands notes                  show your standing notes for this project (kept outside the repository) and where to edit them
+  floorhands url                    print the page link with this run's access token (keep it private)
+  floorhands models                 show which model, effort and spending cap each kind of step uses, and where to change them
 `;
+
+// The token travels in the fragment, which the browser keeps to itself; the page moves it into a header and drops it from the URL.
+const pageUrl = info => `http://localhost:${info.port}/${info.token ? `#t=${encodeURIComponent(info.token)}` : ''}`;
 
 async function live(root) {
   const info = readServerInfo(root);
@@ -65,6 +71,7 @@ async function start(root, { ifEnabled }, out) {
     }
   }
   out.write(`floorhands → http://localhost:${info.port}  (project: ${root})\n`);
+  out.write('open the page with "floorhands open" (or print the link with "floorhands url"): the page needs this run\'s access token\n');
   return { code: 0, info };
 }
 
@@ -94,7 +101,7 @@ async function stop(root, out) {
 
 export async function main(argv, { out = process.stdout, cwd = process.cwd() } = {}) {
   const [cmd = 'help', ...rest] = argv;
-  const known = ['start', 'open', 'status', 'stop', 'enable', 'disable', 'notes'];
+  const known = ['start', 'open', 'status', 'stop', 'enable', 'disable', 'notes', 'url', 'models'];
   if (known.includes(cmd)) {
     const bad = rest.find(a => !(cmd === 'start' && a === '--if-enabled'));
     if (bad !== undefined) {
@@ -110,7 +117,7 @@ export async function main(argv, { out = process.stdout, cwd = process.cwd() } =
       const r = await start(root, {}, out);
       if (r.info) {
         const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
-        const url = `http://localhost:${r.info.port}`;
+        const url = pageUrl(r.info);
         const child = spawn(opener, process.platform === 'win32' ? ['/c', 'start', '', url] : [url], { detached: true, stdio: 'ignore' });
         child.on('error', () => {}); // no opener installed: the URL was already printed
         child.unref();
@@ -121,6 +128,22 @@ export async function main(argv, { out = process.stdout, cwd = process.cwd() } =
       const info = await live(root);
       out.write(info ? `running at http://localhost:${info.port}\n` : 'not running\n');
       out.write(`project: ${root}\nauto-start: ${isEnabled(root) ? 'on' : 'off'}\n`);
+      return 0;
+    }
+    case 'url': {
+      const info = await live(root);
+      if (!info) { out.write('not running (start it with "floorhands start")\n'); return 1; }
+      out.write(`${pageUrl(info)}\n`);
+      return 0;
+    }
+    case 'models': {
+      let policy;
+      try { policy = loadPolicy(); } catch (e) { out.write(`${e.message}\n`); return 1; }
+      out.write(`policy file: ${policyPath()}${fs.existsSync(policyPath()) ? '' : ' (not created; these are the defaults)'}\n`);
+      for (const [name, c] of Object.entries(policy.classes)) {
+        out.write(`  ${name.padEnd(9)} model ${c.model}${c.fallback ? ` (falls back to ${c.fallback})` : ''}, effort ${c.effort ?? 'default'}, cap $${c.budgetUsd} per step\n`);
+      }
+      out.write(`  per task: cap $${policy.taskBudgetUsd}; at most ${policy.maxConcurrentTasks} task(s) at once\n`);
       return 0;
     }
     case 'stop':

@@ -1,6 +1,6 @@
 {
   "name": "floorhands",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Start and use floorhands, a local office of engineering agents, from Claude Code.",
   "author": {
     "name": "floorhands"

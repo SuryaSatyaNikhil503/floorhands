@@ -5,37 +5,37 @@
     { "id": "quality", "name": "RELIABILITY & QUALITY" }
   ],
   "agents": [
-    {"id": "arch", "name": "ARCHITECT", "role": "Technical Architect", "pod": "review", "lead": true, "router": true, "tier": "read", "prompt": "arch.md",
+    {"id": "arch", "name": "ARCHITECT", "role": "Technical Architect", "pod": "review", "lead": true, "router": true, "tier": "read", "prompt": "arch.md", "model": {"default": "frontier", "min": "frontier", "max": "frontier"},
       "skills": [] },
-    {"id": "rfe", "name": "FE REVIEWER", "role": "Senior Front-End Engineer", "pod": "review", "tier": "read", "prompt": "rfe.md",
+    {"id": "rfe", "name": "FE REVIEWER", "role": "Senior Front-End Engineer", "pod": "review", "tier": "read", "prompt": "rfe.md", "model": {"default": "frontier", "min": "frontier", "max": "frontier"},
       "skills": [
         {"name": "anthropic-skills:react-typescript-standards", "alt": ["react-typescript-standards"], "when": ["react", "next"]},
         {"name": "anthropic-skills:design-craft", "alt": ["design-craft"], "when": ["react", "vue", "nuxt", "svelte", "angular", "next"]}
       ] },
-    {"id": "rbe", "name": "BE REVIEWER", "role": "Senior Back-End Engineer", "pod": "review", "tier": "read", "prompt": "rbe.md",
+    {"id": "rbe", "name": "BE REVIEWER", "role": "Senior Back-End Engineer", "pod": "review", "tier": "read", "prompt": "rbe.md", "model": {"default": "frontier", "min": "frontier", "max": "frontier"},
       "skills": [
         {"name": "anthropic-skills:fastapi-standards", "alt": ["fastapi-standards"], "when": ["fastapi"]},
         {"name": "anthropic-skills:spring-boot-standards", "alt": ["spring-boot-standards"], "when": ["spring-boot"]}
       ] },
-    {"id": "raws", "name": "AWS REVIEWER", "role": "Senior AWS DevOps Engineer", "pod": "review", "tier": "read", "prompt": "raws.md",
+    {"id": "raws", "name": "AWS REVIEWER", "role": "Senior AWS DevOps Engineer", "pod": "review", "tier": "read", "prompt": "raws.md", "model": {"default": "frontier", "min": "frontier", "max": "frontier"},
       "skills": [
         {"name": "code-review"}
       ] },
-    {"id": "fe", "name": "FRONT-END ENGINEER", "role": "Front-End Engineer", "pod": "build", "lead": true, "tier": "build", "prompt": "fe.md",
+    {"id": "fe", "name": "FRONT-END ENGINEER", "role": "Front-End Engineer", "pod": "build", "lead": true, "tier": "build", "prompt": "fe.md", "model": {"default": "standard", "min": "light", "max": "frontier"},
       "skills": [
         {"name": "anthropic-skills:react-typescript-standards", "alt": ["react-typescript-standards"], "when": ["react", "next"]},
         {"name": "anthropic-skills:design-craft", "alt": ["design-craft"], "when": ["react", "vue", "nuxt", "svelte", "angular", "next"]}
       ] },
-    {"id": "be", "name": "BACK-END ENGINEER", "role": "Back-End Engineer", "pod": "build", "tier": "build", "prompt": "be.md",
+    {"id": "be", "name": "BACK-END ENGINEER", "role": "Back-End Engineer", "pod": "build", "tier": "build", "prompt": "be.md", "model": {"default": "standard", "min": "light", "max": "frontier"},
       "skills": [
         {"name": "anthropic-skills:fastapi-standards", "alt": ["fastapi-standards"], "when": ["fastapi"]},
         {"name": "anthropic-skills:spring-boot-standards", "alt": ["spring-boot-standards"], "when": ["spring-boot"]}
       ] },
-    {"id": "sre", "name": "SRE", "role": "Site Reliability Engineer", "pod": "quality", "lead": true, "tier": "build", "prompt": "sre.md",
+    {"id": "sre", "name": "SRE", "role": "Site Reliability Engineer", "pod": "quality", "lead": true, "tier": "build", "prompt": "sre.md", "model": {"default": "standard", "min": "light", "max": "frontier"},
       "skills": [] },
-    {"id": "sup", "name": "SUPPORT ENGINEER", "role": "Support Engineer", "pod": "quality", "tier": "read", "prompt": "sup.md",
+    {"id": "sup", "name": "SUPPORT ENGINEER", "role": "Support Engineer", "pod": "quality", "tier": "read", "prompt": "sup.md", "model": {"default": "light", "min": "light", "max": "standard"},
       "skills": [] },
-    {"id": "e2e", "name": "E2E TESTER", "role": "End-to-End Tester", "pod": "quality", "tier": "test", "prompt": "e2e.md",
+    {"id": "e2e", "name": "E2E TESTER", "role": "End-to-End Tester", "pod": "quality", "tier": "test", "prompt": "e2e.md", "model": {"default": "light", "min": "light", "max": "standard"},
       "skills": [] }
   ]
 }

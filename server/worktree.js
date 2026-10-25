@@ -42,8 +42,9 @@ export async function createWorktree(root, taskId, { base = worktreeBase(root) }
   const branch = `floorhands/${taskId}`;
   const dir = path.join(path.resolve(base), taskId);
   fs.mkdirSync(base, { recursive: true });
-  const baseSha = (await git(root, ['rev-parse', 'HEAD'])).trim();
-  await git(root, ['worktree', 'add', '-b', branch, '--', dir, 'HEAD']);
+  const baseSha = (await git(root, [...SAFE_GIT, 'rev-parse', 'HEAD'])).trim();
+  // SAFE_GIT: `worktree add` checks files out, which runs post-checkout hooks and fsmonitor from the repository's config (known limit 15).
+  await git(root, [...SAFE_GIT, 'worktree', 'add', '-b', branch, '--', dir, 'HEAD']);
   const nm = path.join(root, 'node_modules');
   if (fs.existsSync(nm) && !fs.existsSync(path.join(dir, 'node_modules'))) fs.symlinkSync(nm, path.join(dir, 'node_modules'), 'dir');
   return { dir, branch, base: baseSha };
@@ -92,13 +93,54 @@ function assertBase(wt) {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(String(wt?.base ?? ''))) throw new Error('invalid worktree record');
 }
 
+// The server's own diffs never run a diff.external or textconv program from the repository's config: they show the plain change.
+const PLAIN_DIFF = ['--no-ext-diff', '--no-textconv'];
 export async function diff(root, wt) {
   assertBase(wt);
-  return git(root, ['diff', `${wt.base}...${wt.branch}`, '--']);
+  return git(root, [...SAFE_GIT, 'diff', ...PLAIN_DIFF, `${wt.base}...${wt.branch}`, '--']);
 }
 export async function diffStat(root, wt) {
   assertBase(wt);
-  return git(root, ['diff', '--stat', `${wt.base}...${wt.branch}`, '--']);
+  return git(root, [...SAFE_GIT, 'diff', ...PLAIN_DIFF, '--stat', `${wt.base}...${wt.branch}`, '--']);
+}
+export async function changedFiles(root, wt) {
+  assertBase(wt);
+  const out = await git(root, [...SAFE_GIT, 'diff', '--name-only', '-z', `${wt.base}...${wt.branch}`, '--']);
+  return out.split('\0').filter(Boolean);
+}
+
+// Changes the owner should look at twice before approving: anything that decides what runs on their machine later (package scripts,
+// git hooks, CI, build config) rather than what the code does. Pure: a list of paths in, a list of { flag, path } out.
+const RISKY = [
+  ['package-manifest', /(^|\/)package\.json$/],
+  ['lockfile', /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/],
+  ['git-hooks', /(^|\/)(\.husky|\.githooks|\.git-hooks)\//],
+  ['git-attributes', /(^|\/)\.gitattributes$/],
+  ['ci', /^\.github\/(workflows|actions)\/|(^|\/)(\.gitlab-ci\.yml|\.circleci\/|Jenkinsfile$|azure-pipelines\.yml$)/],
+  ['package-config', /(^|\/)(\.npmrc|\.yarnrc(\.yml)?|\.pnpmfile\.cjs)$/],
+  ['build-config', /(^|\/)([\w.-]+\.config\.(c|m)?(j|t)s|Makefile|Dockerfile|docker-compose\.ya?ml|\.babelrc|tsconfig[\w.-]*\.json)$/],
+  ['agent-config', /(^|\/)(\.claude\/|\.mcp\.json$|CLAUDE\.md$|AGENTS\.md$)/],
+];
+export function riskFlags(files) {
+  const out = [];
+  for (const f of Array.isArray(files) ? files : []) {
+    for (const [flag, re] of RISKY) if (re.test(f)) { out.push({ flag, path: String(f).slice(0, 300) }); break; }
+  }
+  return out.slice(0, 50);
+}
+
+// Whether the "scripts" of the root package.json differ between the task's base commit and the worktree. A builder can rewrite what
+// `npm test` runs, so a test step after such a change would execute agent-written code: the orchestrator refuses that step.
+export async function scriptsChanged(wt) {
+  assertBase(wt);
+  const scripts = text => {
+    try { const j = JSON.parse(text); return JSON.stringify(j?.scripts ?? null); } catch { return 'unparseable'; }
+  };
+  let before;
+  try { before = scripts(await git(wt.dir, [...SAFE_GIT, 'show', `${wt.base}:package.json`])); } catch { before = 'absent'; }
+  let after;
+  try { after = scripts(fs.readFileSync(path.join(wt.dir, 'package.json'), 'utf8')); } catch { after = 'absent'; }
+  return before !== after;
 }
 
 // A wt record is read back from a task file that can be hand-edited, so it is only trusted
@@ -131,8 +173,14 @@ export async function approve(root, wt, message, { base = worktreeBase(root) } =
   if (!(await gitOk(root, ['symbolic-ref', '-q', 'HEAD']))) {
     throw new Error(`Your repository is on a detached HEAD. Check out a branch, then approve again. The floorhands branch ${wt.branch} is kept.`);
   }
+  // The merge runs the owner's own hooks, unless the branch itself changed files under a hooks directory: then those hooks are
+  // agent-written, and running them on Approve would execute agent code outside every sandbox, so this merge runs with none.
+  let changed = [];
+  try { changed = await changedFiles(root, wt); } catch { /* treat as unknown below */ }
+  const hooksTouched = !changed.length || riskFlags(changed).some(f => f.flag === 'git-hooks') || await touchesHooksPath(root, changed);
+  const hookArgs = hooksTouched ? ['-c', 'core.hooksPath=/dev/null'] : [];
   try {
-    await git(root, [...(await identityArgs(root)), 'merge', '--no-ff', '-m', message, '--', wt.branch]);
+    await git(root, [...hookArgs, ...(await identityArgs(root)), 'merge', '--no-ff', '-m', message, '--', wt.branch]);
   } catch {
     // Only abort a merge our own attempt left behind; the owner's was ruled out above.
     if (await gitOk(root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])) {
@@ -140,7 +188,19 @@ export async function approve(root, wt, message, { base = worktreeBase(root) } =
     }
     throw new Error(`The merge did not apply cleanly (conflicts, or uncommitted changes in your working copy). Nothing was changed; the floorhands branch is kept as ${wt.branch}.`);
   }
+  let mergeSha = null;
+  try { mergeSha = (await git(root, [...SAFE_GIT, 'rev-parse', 'HEAD'])).trim(); } catch { /* recorded as unknown */ }
   await cleanup(root, wt);
+  return { mergeSha, hooksSkipped: hooksTouched };
+}
+
+// True when a changed file lies under the repository's configured core.hooksPath (e.g. a custom hooks folder in the repo).
+async function touchesHooksPath(root, changed) {
+  let hp;
+  try { hp = (await git(root, ['config', '--get', 'core.hooksPath'])).trim(); } catch { return false; }
+  if (!hp || hp.startsWith('/') || hp.startsWith('~')) return false;
+  const dir = hp.replace(/^\.\//, '').replace(/\/+$/, '') + '/';
+  return changed.some(f => f.startsWith(dir));
 }
 
 export async function reject(root, wt, { base = worktreeBase(root) } = {}) {

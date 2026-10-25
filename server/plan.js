@@ -1,3 +1,5 @@
+import { CLASSES } from './models.js';
+
 export const MAX_STEPS = 6;
 
 const MAX_QUOTED = 40;
@@ -65,7 +67,13 @@ export function parsePlan(text, validIds) {
       problems.push(`more than ${MAX_STEPS} steps; the rest were dropped`);
       break;
     }
-    steps.push({ agent: s.agent, task });
+    // The model class is only a proposal: an unknown value is dropped (the agent's default applies) and models.js clamps a known one.
+    let cls;
+    if (s.class !== undefined && s.class !== null) {
+      if (CLASSES.includes(s.class)) cls = s.class;
+      else problems.push(`step ${n}: unknown class "${clip(String(s.class))}" ignored`);
+    }
+    steps.push(cls ? { agent: s.agent, task, class: cls } : { agent: s.agent, task });
   }
 
   if (!steps.length && !summary) throw new Error('The architect\'s plan had no steps and no answer.');

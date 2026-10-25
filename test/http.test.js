@@ -30,8 +30,11 @@ const orchestrator = {
   run: async id => { runs.push(id); if (failRun) throw new Error('run boom'); },
   diff: id => diffImpl(id),
   approve: async () => { if (failApprove) throw new Error('merge conflict'); },
-  reject: async () => {},
+  reject: async (id, why) => { rejects.push({ id, why }); },
+  decideBudget: (id, d) => { if (d.decision === 'boom') throw new Error('This task is not waiting for a budget decision.'); budgets.push({ id, ...d }); },
 };
+const budgets = [];
+const rejects = [];
 const hub = createHub();
 let server, port;
 
@@ -325,4 +328,56 @@ test('a dead SSE client is dropped without disturbing the others', async () => {
   } finally {
     await new Promise(r => { srv.closeAllConnections?.(); srv.close(r); });
   }
+});
+
+test('with a token, every /api route but health needs it (header, or ?t= for the event stream only)', async () => {
+  const token = 'tok-' + 'x'.repeat(40);
+  const app = createApp({ root, roster, store, orchestrator, hub, uiDir, log: () => {}, token });
+  await new Promise(r => app.listen(0, '127.0.0.1', r));
+  const p = app.address().port;
+  try {
+    assert.equal((await request({ path: '/api/health', port: p })).status, 200);
+    assert.equal((await request({ path: '/api/state', port: p })).status, 401);
+    assert.equal((await request({ path: '/api/state', port: p, headers: { 'x-floorhands-token': 'wrong' } })).status, 401);
+    assert.equal((await request({ path: '/api/state', port: p, headers: { 'x-floorhands-token': token } })).status, 200);
+    assert.equal((await request({ path: `/api/state?t=${token}`, port: p })).status, 401, 'the query form is only for /api/events');
+    const before = runs.length;
+    const r = await request({ method: 'POST', path: '/api/tasks', port: p, headers: { 'content-type': 'application/json' }, body: '{"text":"x"}' });
+    assert.equal(r.status, 401);
+    assert.equal(runs.length, before, 'no task started');
+    assert.equal((await request({ path: '/', port: p })).status, 200, 'the page itself is not gated: it holds no project data');
+    await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: p, path: `/api/events?t=${token}`, headers: { host: `localhost:${p}` } }, res => {
+        assert.equal(res.statusCode, 200);
+        res.destroy();
+        resolve();
+      });
+      req.on('error', e => (e.code === 'ECONNRESET' ? resolve() : reject(e)));
+      req.end();
+    });
+  } finally {
+    await new Promise(r => { app.closeAllConnections?.(); app.close(r); });
+  }
+});
+
+test('reject passes an optional reason and note through; an empty body still works', async () => {
+  const t = store.createTask(root, 'reject me');
+  rejects.length = 0;
+  assert.equal((await post(`/api/tasks/${t.id}/reject`, { reason: 'too-big', note: 'split it', extra: 1 })).status, 200);
+  assert.equal((await request({ method: 'POST', path: `/api/tasks/${t.id}/reject`, headers: { 'content-type': 'application/json' } })).status, 200);
+  assert.equal((await post(`/api/tasks/${t.id}/reject`, { reason: 7 })).status, 200);
+  assert.deepEqual(rejects.map(r => r.why), [{ reason: 'too-big', note: 'split it' }, {}, {}]);
+  const bad = await request({ method: 'POST', path: `/api/tasks/${t.id}/reject`, headers: { 'content-type': 'application/json' }, body: '{nope' });
+  assert.equal(bad.status, 400);
+});
+
+
+test('the budget route passes the owner\'s decision through and reports refusals as 409', async () => {
+  const t = store.createTask(root, 'budget');
+  assert.equal((await post(`/api/tasks/${t.id}/budget`, { decision: 'allow', extraUsd: 2, extra: 'x' })).status, 200);
+  assert.deepEqual(budgets.at(-1), { id: t.id, decision: 'allow', extraUsd: 2 });
+  const refused = await post(`/api/tasks/${t.id}/budget`, { decision: 'boom' });
+  assert.equal(refused.status, 409);
+  assert.match(JSON.parse(refused.body).error, /not waiting/);
+  assert.equal((await post(`/api/tasks/${t.id}/budget`, [1])).status, 400);
 });
