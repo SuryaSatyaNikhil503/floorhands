@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildClaudeArgs, denyRules, TIERS, BASH_SANDBOX_SETTINGS } from '../server/tiers.js';
+import { buildClaudeArgs, denyRules, TIERS, BASH_SANDBOX_SETTINGS, AGENT_SESSION_SETTINGS } from '../server/tiers.js';
 
 // values following a variadic flag, up to the next --flag
 function valuesOf(args, flag) {
@@ -212,13 +212,28 @@ test('grep-like commands are denied for every tier (they read .env without namin
   for (const tier of Object.values(TIERS)) assert.ok(tier.tools.includes('Grep'), 'the Grep tool replaces Bash grep');
 });
 
-test('build and test tiers run Bash in the sandbox; the read tier does not pass --settings', () => {
-  for (const tier of ['build', 'test']) {
+test('every tier runs Bash in the sandbox, the read tier too (repo-configured diff programs stay contained)', () => {
+  for (const tier of ['read', 'build', 'test']) {
     const a = args(tier);
     assert.equal(a.filter(x => x === '--settings').length, 1, tier);
-    assert.deepEqual(JSON.parse(valuesOf(a, '--settings')[0]), BASH_SANDBOX_SETTINGS);
+    assert.deepEqual(JSON.parse(valuesOf(a, '--settings')[0]), { ...AGENT_SESSION_SETTINGS, ...BASH_SANDBOX_SETTINGS });
   }
-  assert.ok(!args('read').includes('--settings'));
+});
+
+test('agent sessions are slim and cache-friendly: no owner hooks, no auto memory, dynamic sections out of the system prompt', () => {
+  for (const tier of Object.keys(TIERS)) {
+    const a = args(tier);
+    const settings = JSON.parse(valuesOf(a, '--settings')[0]);
+    assert.equal(settings.disableAllHooks, true, tier);
+    assert.equal(settings.autoMemoryEnabled, false, tier);
+    assert.ok(a.includes('--exclude-dynamic-system-prompt-sections'), tier);
+    assert.equal(a.filter(x => x === '--settings').length, 1, `${tier}: one --settings, so nothing overrides the sandbox`);
+  }
+});
+
+test('owner skills are off unless the agent has a skill hint for this project', () => {
+  assert.ok(args('read').includes('--disable-slash-commands'));
+  assert.ok(!args('read', { skills: true }).includes('--disable-slash-commands'));
 });
 
 test('the sandbox settings fail closed', () => {
@@ -288,5 +303,25 @@ test('--settings never lands inside a variadic list', () => {
     const i = a.indexOf('--settings');
     assert.ok(i > a.indexOf('--append-system-prompt') + 1);
     assert.ok(!valuesOf(a, '--disallowedTools').includes('--settings'));
+  }
+});
+
+test('a system prompt file replaces the inline prompt and must be an absolute path', () => {
+  const a = buildClaudeArgs({ agent: { tier: 'read' }, systemFile: '/tmp/x/system.md' });
+  assert.deepEqual(valuesOf(a, '--append-system-prompt-file'), ['/tmp/x/system.md']);
+  assert.ok(!a.includes('--append-system-prompt'));
+  assert.throws(() => buildClaudeArgs({ agent: { tier: 'read' }, systemFile: 'relative.md' }), /absolute path/);
+  assert.throws(() => buildClaudeArgs({ agent: { tier: 'read' }, systemFile: 5 }), /absolute path/);
+});
+
+test('model, fallback, effort and budget flags are validated before they reach argv', () => {
+  const a = args('build', { model: 'claude-sonnet-5-5', fallback: 'haiku', effort: 'medium', budgetUsd: 1.5 });
+  assert.deepEqual(valuesOf(a, '--model'), ['claude-sonnet-5-5']);
+  assert.deepEqual(valuesOf(a, '--fallback-model'), ['haiku']);
+  assert.deepEqual(valuesOf(a, '--effort'), ['medium']);
+  assert.deepEqual(valuesOf(a, '--max-budget-usd'), ['1.5']);
+  assert.ok(!args('read', { model: 'opus', fallback: 'opus' }).includes('--fallback-model'), 'a fallback equal to the model is dropped');
+  for (const bad of [{ model: '--dangerously-skip-permissions' }, { model: 'gpt-5' }, { fallback: '-x' }, { effort: 'ultra' }, { budgetUsd: -1 }, { budgetUsd: 'NaN' }, { budgetUsd: Infinity }]) {
+    assert.throws(() => args('read', bad), /invalid|budget/, JSON.stringify(bad));
   }
 });

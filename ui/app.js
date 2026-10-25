@@ -37,14 +37,28 @@ const cls = s => String(s ?? '').replace(/[^a-z_]/gi, '');
 const state = {
   project: '', roster: { pods: [], agents: [] }, tasks: [],
   selected: null, selectedAgent: null,
-  detail: null, diff: null, detailError: '', actionError: '', pending: null, seq: 0,
+  detail: null, diff: null, detailError: '', actionError: '', pending: null, seq: 0, reason: '',
   stack: false,
 };
 const activity = createActivity();
 
 /* ---------- http ---------- */
+/* The per-run token arrives in the URL fragment (never sent to a server), moves to sessionStorage, and leaves the address bar. */
+const TOKEN = (() => {
+  let t = '';
+  const m = /^#t=([^&]+)/.exec(location.hash);
+  if (m) {
+    try { t = decodeURIComponent(m[1]); } catch { t = ''; }
+    try { sessionStorage.setItem('floorhands-token', t); } catch { /* private mode: this tab still works */ }
+    history.replaceState(null, '', location.pathname + location.search);
+  } else {
+    try { t = sessionStorage.getItem('floorhands-token') ?? ''; } catch { t = ''; }
+  }
+  return t;
+})();
+
 async function api(method, path, body) {
-  const r = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(path, { method, headers: { 'content-type': 'application/json', 'x-floorhands-token': TOKEN }, body: body ? JSON.stringify(body) : undefined });
   const raw = await r.text();
   if (!r.ok) {
     let msg = raw;
@@ -214,9 +228,12 @@ function detailNodes() {
   const kids = [el('h2', {}, 'Task'), el('p', {}, String(t.text ?? '')), el('p', {}, el('span', { class: `badge ${cls(status)}` }, status.replaceAll('_', ' ')))];
   if (t.summary) kids.push(el('p', { class: 'summary' }, String(t.summary)));
   if (t.error) kids.push(el('p', { class: 'error' }, String(t.error)));
+  if (status === 'needs_budget' && t.budgetRequest && typeof t.budgetRequest === 'object') kids.push(budgetBox(t));
+  const usage = usageLine(t.totals);
+  if (usage) kids.push(el('p', { class: 'muted usage' }, usage));
   for (const s of t.steps ?? []) {
     kids.push(el('div', { class: 'step' },
-      el('h3', {}, `${names.get(s.agent) ?? s.agent} — ${s.status}`),
+      el('h3', {}, `${names.get(s.agent) ?? s.agent} — ${s.status}`, routeChip(s)),
       el('p', { class: 'muted' }, String(s.task ?? '')),
       s.output ? el('pre', {}, String(s.output)) : ''));
   }
@@ -228,12 +245,22 @@ function detailNodes() {
     } else {
       kids.push(el('pre', { class: 'diff' }, ...classifyDiff(state.diff.text).map(l => el('span', { class: l.kind }, l.text || ' '))));
     }
+    const flags = Array.isArray(t.riskFlags) ? t.riskFlags : [];
+    if (flags.length) {
+      kids.push(el('div', { class: 'risk', role: 'note' },
+        el('p', {}, 'Check these before approving. They change what runs on your machine later, not just what the code does:'),
+        el('ul', {}, ...flags.slice(0, 20).map(f => el('li', {}, `${RISK_LABELS[f.flag] ?? String(f.flag)}: ${String(f.path ?? '')}`)))));
+    }
     const busy = state.pending?.id === t.id;
     const approve = el('button', { type: 'button', class: 'primary', 'data-key': 'detail:approve', onclick: () => fire(decide('approve')) }, 'Approve and merge');
     const reject = el('button', { type: 'button', class: 'danger', 'data-key': 'detail:reject', onclick: () => fire(decide('reject')) }, 'Reject');
+    const reason = el('select', { 'data-key': 'detail:reason', 'aria-label': 'Why reject (optional)', onchange: e => { state.reason = e.target.value; } },
+      ...REJECT_REASONS.map(([v, label]) => el('option', { value: v }, label)));
+    reason.value = state.reason;
     approve.disabled = busy || !!problem;
     reject.disabled = busy;
-    kids.push(el('div', { class: 'actions' }, approve, reject));
+    reason.disabled = busy;
+    kids.push(el('div', { class: 'actions' }, approve, reason, reject));
     if (problem) kids.push(el('div', { class: 'actions' }, el('button', { type: 'button', 'data-key': 'detail:retry', onclick: () => fire(loadDetail()) }, 'Reload diff')));
     if (state.actionError) kids.push(el('p', { class: 'error', role: 'alert' }, state.actionError));
   } else if (state.actionError) {
@@ -247,6 +274,58 @@ function detailNodes() {
     }
   }
   return kids;
+}
+
+/* Shown while a step or the task waits at its spending cap. Nothing is spent until the owner answers. */
+function budgetBox(t) {
+  const q = t.budgetRequest;
+  const who = String(q.agentName ?? q.agent ?? 'This step');
+  const what = q.kind === 'task' ? `The task has used ${money(q.spentUsd)} of its ${money(q.budgetUsd)} cap before ${who}'s step.` : `${who} has used ${money(q.spentUsd)} of its ${money(q.budgetUsd)} cap for this step.`;
+  const extra = Number(q.suggestedUsd) > 0 ? Number(q.suggestedUsd) : 1;
+  const busy = state.pending?.id === t.id;
+  const allow = el('button', { type: 'button', class: 'primary', 'data-key': 'detail:budget-allow', onclick: () => fire(budget(t.id, { decision: 'allow', extraUsd: extra })) }, `Allow ${money(extra)} more`);
+  const stop = el('button', { type: 'button', class: 'danger', 'data-key': 'detail:budget-stop', onclick: () => fire(budget(t.id, { decision: 'stop' })) }, 'Stop here');
+  allow.disabled = busy; stop.disabled = busy;
+  return el('div', { class: 'risk', role: 'alert' },
+    el('p', {}, `${what} The next model request needs about ${money(q.neededUsd)} more. Nothing more is spent until you decide.`),
+    el('div', { class: 'actions' }, allow, stop));
+}
+
+async function budget(id, body) {
+  if (state.pending) return;
+  state.pending = { id, action: 'budget' };
+  state.actionError = '';
+  renderDetail();
+  try { await api('POST', `/api/tasks/${enc(id)}/budget`, body); }
+  catch (e) { if (state.selected === id) state.actionError = errMsg(e); }
+  state.pending = null;
+  if (state.selected === id) { renderDetail(); await loadDetail(); }
+}
+
+const REJECT_REASONS = [['', 'Reason (optional)'], ['wrong', 'Wrong or broken'], ['too-big', 'Too big'], ['wrong-approach', 'Wrong approach'],
+  ['noise', 'Noise, not useful'], ['not-needed', 'Not needed'], ['other', 'Other']];
+const RISK_LABELS = {
+  'package-manifest': 'package.json', lockfile: 'Lockfile', 'git-hooks': 'Git hook', 'git-attributes': '.gitattributes', ci: 'CI pipeline',
+  'package-config': 'Package manager config', 'build-config': 'Build config', 'agent-config': 'Agent config',
+  'test-skipped-scripts-changed': 'Tests not run, because the package.json scripts changed',
+};
+const money = v => (typeof v === 'number' && Number.isFinite(v) ? `$${v < 1 ? v.toFixed(3) : v.toFixed(2)}` : '');
+const tokens = n => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
+
+/* "opus · frontier · $0.412" next to a step: the model that actually ran when known, else the one requested. */
+function routeChip(s) {
+  const r = s?.route;
+  if (!r || typeof r !== 'object') return '';
+  const ran = typeof s.metrics?.model === 'string' ? s.metrics.model : String(r.model ?? '');
+  const parts = [ran, String(r.class ?? ''), money(s.metrics?.costUsd)].filter(Boolean);
+  return el('span', { class: 'chip', title: r.requested && r.requested !== r.class ? `The plan asked for ${r.requested}; this agent's range allows ${r.class}.` : 'Model, class and cost of this step' }, parts.join(' · '));
+}
+
+function usageLine(tot) {
+  if (!tot || typeof tot !== 'object' || !tot.runs) return '';
+  const by = tot.byModel && typeof tot.byModel === 'object' ? Object.entries(tot.byModel).map(([m, v]) => `${m} ×${Number(v?.runs) || 0}`).join(', ') : '';
+  const io = Number(tot.inputTokens) + Number(tot.cacheReadTokens) + Number(tot.cacheWriteTokens);
+  return `Usage: ${money(tot.costUsd)} over ${tot.runs} run${tot.runs === 1 ? '' : 's'} · ${tokens(io || 0)} in (${tokens(Number(tot.cacheReadTokens) || 0)} from cache), ${tokens(Number(tot.outputTokens) || 0)} out${by ? ` · ${by}` : ''}`;
 }
 
 function renderDetail() {
@@ -264,7 +343,8 @@ async function decide(action) {
   state.pending = { id, action };
   state.actionError = '';
   renderDetail();
-  try { await api('POST', `/api/tasks/${enc(id)}/${action}`, {}); }
+  const body = action === 'reject' && state.reason ? { reason: state.reason } : {};
+  try { await api('POST', `/api/tasks/${enc(id)}/${action}`, body); state.reason = ''; }
   catch (e) { if (state.selected === id) state.actionError = errMsg(e); }
   state.pending = null;
   if (state.selected !== id) return;
@@ -309,7 +389,7 @@ function onEvent(ev) {
 let source = null;
 function connect() {
   if (source) return;
-  source = new EventSource('/api/events');
+  source = new EventSource(`/api/events?t=${enc(TOKEN)}`);
   source.onopen = () => { setConn(true); fire(resync()); };
   source.onerror = () => {
     setConn(false);

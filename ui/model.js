@@ -2,7 +2,7 @@
 
 /* ---------- attribute allowlist for the element builder ---------- */
 const PLAIN_ATTRS = new Set([
-  'class', 'id', 'role', 'tabindex', 'type', 'for', 'title', 'placeholder', 'maxlength', 'rows', 'hidden', 'data-key',
+  'class', 'id', 'role', 'tabindex', 'type', 'for', 'title', 'placeholder', 'maxlength', 'rows', 'hidden', 'data-key', 'value',
   'x', 'y', 'cx', 'cy', 'r', 'rx', 'width', 'height', 'viewBox', 'transform',
 ]);
 

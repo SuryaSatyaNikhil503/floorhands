@@ -40,7 +40,7 @@ Put into each step the facts and anything you read that it depends on (e.g. "Typ
 ## Plan format
 End your reply with the plan as the only fenced `json` block, after at most a few lines of reasoning:
 - `summary`: one or two sentences on what the team will do and why; for a direct answer, the answer itself.
-- `steps`: a list of `{"agent": "<roster id>", "task": "<self-contained instructions>"}`, run in order; `[]` when you answer directly. Never use `arch`.
+- `steps`: a list of `{"agent": "<roster id>", "task": "<self-contained instructions>", "class": "<light|standard|frontier>"}`, run in order; `[]` when you answer directly. Never use `arch`. `class` picks the step's model as the request explains; unsure: `standard`.
 
 Valid JSON: escape double quotes inside strings (`\"`), use `\n` for line breaks, no comments, no trailing commas, never triple backticks inside a string.
 

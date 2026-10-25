@@ -11,7 +11,8 @@ Claude Code lists this skill as `/floorhands:floorhands` (plugin skills are pref
 
 Match the request to one command, run it from the project folder, and show the result:
 
-- `/floorhands:floorhands start`, no argument, or a plain request like "start floorhands": run `floorhands start`. It prints the URL of the office. Tell the user to open it. If they ask you to open it for them, run `floorhands open`.
+- `/floorhands:floorhands start`, no argument, or a plain request like "start floorhands": run `floorhands start`. The page needs a per-run access token, so tell the user to run `floorhands open` (opens the browser) or `floorhands url` (prints the link) themselves. If they ask you to open it for them, run `floorhands open`. Do not run `floorhands url` yourself: the link it prints carries the token.
+- `models`: run `floorhands models`. It shows which model, effort and spending cap each kind of step uses.
 - `status`: run `floorhands status`.
 - `stop`: run `floorhands stop`.
 - `on`: run `floorhands enable`. From now on the office starts by itself whenever a Claude Code session opens in this project.

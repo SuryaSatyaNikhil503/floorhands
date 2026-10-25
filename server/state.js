@@ -25,7 +25,7 @@ export function writeServerInfo(root, info) {
   fs.mkdirSync(stateDir(root), { recursive: true });
   // Write-then-rename so a reader never sees half a file.
   const tmp = `${infoFile(root)}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(info));
+  fs.writeFileSync(tmp, JSON.stringify(info), { mode: 0o600 }); // holds the per-run token: owner-only
   fs.renameSync(tmp, infoFile(root));
 }
 

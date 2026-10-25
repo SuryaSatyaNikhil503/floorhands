@@ -168,3 +168,34 @@ test('notes prints the path, then the contents or a hint, and creates nothing', 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('models shows the defaults, then the owner policy; a broken policy is an error', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-cli-models-'));
+  try {
+    const run = () => execFileSync(process.execPath, [BIN, 'models'], { cwd: project, env: { ...env, FLOORHANDS_HOME: home }, encoding: 'utf8' });
+    const out = run();
+    assert.match(out, /not created; these are the defaults/);
+    assert.match(out, /light {5}model haiku, effort low, cap \$0\.5 per step/);
+    assert.match(out, /frontier {2}model opus \(falls back to sonnet\), effort high/);
+    assert.match(out, /at most 1 task\(s\) at once/);
+    fs.writeFileSync(path.join(home, 'models.json'), JSON.stringify({ classes: { standard: { model: 'opus' } }, maxConcurrentTasks: 2 }));
+    assert.match(run(), /standard {2}model opus/);
+    fs.writeFileSync(path.join(home, 'models.json'), '{"classes":{"light":{"model":"--x"}}}');
+    assert.throws(run, e => /classes\.light\.model/.test(String(e.stdout)) && e.status === 1);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('url prints the page link with the run token only while running', () => {
+  const run = () => { try { return { out: execFileSync(process.execPath, [BIN, 'url'], { cwd: project, env, encoding: 'utf8' }), code: 0 }; } catch (e) { return { out: String(e.stdout), code: e.status }; } };
+  assert.equal(run().code, 1);
+  execFileSync(process.execPath, [BIN, 'start'], { cwd: project, env });
+  try {
+    const { out, code } = run();
+    assert.equal(code, 0);
+    assert.match(out, /^http:\/\/localhost:\d+\/#t=[A-Za-z0-9_-]{40,}\n$/);
+  } finally {
+    execFileSync(process.execPath, [BIN, 'stop'], { cwd: project, env });
+  }
+});

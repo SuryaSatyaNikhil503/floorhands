@@ -52,7 +52,9 @@ test('summary keeps only what the UI list needs', () => {
   const root = tmp();
   const t = createTask(root, 'x');
   t.steps = [{ agent: 'fe', task: 'long', status: 'done', output: 'big', tools: [] }];
-  assert.deepEqual(summary(t).steps, [{ agent: 'fe', status: 'done' }]);
+  assert.deepEqual(summary(t).steps, [{ agent: 'fe', status: 'done', model: null, class: null }]);
+  t.steps[0].route = { class: 'standard', model: 'sonnet', budgetUsd: 2 };
+  assert.deepEqual(summary(t).steps, [{ agent: 'fe', status: 'done', model: 'sonnet', class: 'standard' }]);
   assert.equal(summary(t).events, undefined);
 });
 
@@ -140,4 +142,22 @@ test('recoverInterrupted skips non-task files, recovers the rest and bumps updat
   assert.equal(recovered.status, 'failed');
   assert.ok(recovered.updatedAt > old, recovered.updatedAt);
   assert.equal(getTask(root, 't-junk'), null);
+});
+
+test('savePatch keeps a redacted, owner-only copy and only the newest 50', async () => {
+  const { savePatch, saveTask, getTask } = await import('../server/store.js');
+  const fsm = await import('node:fs');
+  const root = tmp();
+  const file = savePatch(root, 't-abc', '+const key = "AKIAABCDEFGHIJKLMNOP";\n');
+  assert.equal(fsm.readFileSync(file, 'utf8'), '+const key = "[REDACTED aws key id]";\n');
+  assert.equal(fsm.statSync(file).mode & 0o777, 0o600);
+  assert.equal(savePatch(root, '../evil', 'x'), null);
+  assert.equal(savePatch(root, 't-empty', ''), null);
+  for (let i = 0; i < 55; i++) savePatch(root, `t-n${String(i).padStart(2, '0')}`, `p${i}`);
+  const left = fsm.readdirSync(file.replace(/\/[^/]+$/, ''));
+  assert.equal(left.length, 50);
+  const t = createTask(root, 'x');
+  saveTask(root, t);
+  assert.equal(fsm.statSync(`${root}/.floorhands/tasks/${t.id}.json`).mode & 0o777, 0o600, 'task files are owner-only');
+  assert.ok(getTask(root, t.id));
 });
