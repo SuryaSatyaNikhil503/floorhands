@@ -10,6 +10,10 @@ All notable changes to floorhands are recorded here. The format follows [Keep a 
 - CI on Windows (`.github/workflows/platforms.yml`): native Windows must refuse with the WSL2 message, and inside WSL2 Ubuntu 24.04 the test suite and the keyless permission probes must pass.
 - README: a Platform support section with WSL2 steps.
 
+### Fixed
+
+- On git before 2.44 (Ubuntu 24.04, the default WSL distribution, ships 2.43) the project scan fell back to a plain folder walk, because git refused the `--no-lazy-fetch` option, so project facts counted git-ignored files. The scan now retries without that one option, keeping the other two protections, each of which blocks every hostile fixture on its own. Found by the new WSL2 CI job.
+
 ## [0.3.0] - 2026-10-26
 
 The right model for each step, spending caps that never overshoot, a record of what every run cost, and a stricter safety model. The permission model changed (`server/tiers.js`). All 73 permission probes were run on it with Claude Code 2.1.310, on macOS and Linux, with no API key: 71 PASS and 2 known limits.
