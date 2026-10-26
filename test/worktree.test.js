@@ -479,3 +479,17 @@ test('review residual #8: runner settings inside package.json and git-ignored te
   fs.writeFileSync(path.join(wt.dir, '.npmrc'), 'node-options=--require ./evil.js\n');
   assert.deepEqual(changesTestDefinition(await ignoredFiles(wt)), ['.npmrc']);
 });
+
+
+test('a large ignored build folder is listed as one entry and does not count as test setup', async () => {
+  const { ignoredFiles, changesTestDefinition } = await import('../server/worktree.js');
+  const { root, base } = makeRepo();
+  const wt = await createWorktree(root, 't-big', { base });
+  fs.writeFileSync(path.join(wt.dir, '.gitignore'), '.next/\n');
+  fs.mkdirSync(path.join(wt.dir, '.next', 'cache'), { recursive: true });
+  for (let i = 0; i < 2000; i++) fs.writeFileSync(path.join(wt.dir, '.next', 'cache', `f${i}.js`), '');
+  fs.writeFileSync(path.join(wt.dir, '.next', 'babel.config.js'), '');
+  const files = await ignoredFiles(wt);
+  assert.deepEqual(files, ['.next/']);
+  assert.deepEqual(changesTestDefinition(files), []);
+});

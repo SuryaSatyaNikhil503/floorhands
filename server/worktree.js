@@ -134,7 +134,9 @@ export function riskFlags(files) {
 const TEST_DEFINITION = /(^|\/)(\.npmrc|\.yarnrc(\.yml)?|\.pnpmfile\.cjs|\.mocharc(\.[\w]+)?|(jest|vitest|vite|mocha|ava|playwright|cypress|karma|babel)\.config\.[\w.]+|\.babelrc(\.[\w]+)?)$/;
 // Ignored files never reach the commit, so changedFiles cannot see a builder that git-ignored an .npmrc and then wrote it.
 export async function ignoredFiles(wt) {
-  const out = await git(wt.dir, [...SAFE_GIT, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.']);
+  // --directory lists a wholly ignored folder (.next/, target/) as one entry: a huge ignored tree cannot overflow the output buffer,
+  // and files inside build folders are not mistaken for test setup.
+  const out = await git(wt.dir, [...SAFE_GIT, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', '--', '.']);
   return out.split('\0').filter(f => f && !f.startsWith('node_modules'));
 }
 export const changesTestDefinition = files => (Array.isArray(files) ? files : []).filter(f => TEST_DEFINITION.test(String(f)));
