@@ -4,9 +4,9 @@ All notable changes to floorhands are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-10-25
+## [0.3.0] - 2026-10-26
 
-The right model for each step, spending caps, a record of what every run cost, and a stricter safety model. The permission model changed (`server/tiers.js`), and the full set of probes has not been re-run on it yet; see the README's What has been verified.
+The right model for each step, spending caps that never overshoot, a record of what every run cost, and a stricter safety model. The permission model changed (`server/tiers.js`). All 73 permission probes were run on it with Claude Code 2.1.310, on macOS and Linux, with no API key: 71 PASS and 2 known limits.
 
 ### Added
 
