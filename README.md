@@ -99,7 +99,7 @@ floorhands runs every agent inside Claude Code's sandbox and refuses to run one 
 
 **On Windows, step by step:** in PowerShell, run `wsl --install` (or `wsl --set-version <distribution> 2` for an existing WSL1 distribution). Inside the WSL2 distribution, install Node 22, git, `bubblewrap`, `socat` and Claude Code, and keep your projects on the Linux filesystem (your home folder there), not under `/mnt/c`, where permissions and symlinks behave differently. Then use floorhands as on Linux, and open the page from your Windows browser with the link `floorhands url` prints.
 
-**No Docker shortcut on a Mac.** In an unprivileged container, bubblewrap cannot start (Claude Code's docs), so a plain Linux container on your Mac is not a faithful test. Use CI, a Linux VM, or a WSL2 machine.
+**No Docker shortcut on a Mac.** In an unprivileged container, bubblewrap fails by default (Claude Code's docs), and the weaker nested mode that works there is not what floorhands uses. So a plain Linux container on your Mac is not a faithful test. Use CI, a Linux VM, or a WSL2 machine. To work on floorhands itself on a machine without the sandbox, `FLOORHANDS_PLATFORM_CHECK=off` skips the start-up check, and Claude Code still refuses to run an agent there.
 
 ## Install in Claude Code
 

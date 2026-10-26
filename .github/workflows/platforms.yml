@@ -53,8 +53,24 @@ jobs:
           wsl-version: 2
           additional-packages: git curl ca-certificates xz-utils bubblewrap socat
 
+      # A normal user, as a real WSL2 setup has: root ignores file permissions (a test relies on them) and never meets the
+      # unprivileged user-namespace path bubblewrap takes for real users. Node is installed for everyone.
+      - name: Normal user, Node 22 and the sandbox settings (as root)
+        shell: wsl-bash {0}
+        run: |
+          set -eu
+          grep -i wsl2 /proc/version
+          useradd -m -s /bin/bash fh
+          echo 'fh ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/fh
+          v=v22.11.0
+          curl -fsSL "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" -o /tmp/node.tar.xz
+          tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+          node --version
+          # Ubuntu 24.04 restricts the user namespaces bubblewrap needs; lift it on this throwaway machine only.
+          sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       # Work on the Linux filesystem inside WSL (not /mnt/c), where permissions, symlinks and line endings behave as on Linux.
-      - name: Check out inside WSL2
+      - name: Check out inside WSL2 (as the normal user)
         shell: wsl-bash {0}
         env:
           REF: ${{ github.ref }}
@@ -63,39 +79,32 @@ jobs:
           WSLENV: REF/u:REPO/u
         run: |
           set -eu
-          grep -i wsl2 /proc/version
-          git clone -q "https://github.com/$REPO" "$HOME/fh"
-          cd "$HOME/fh"
-          git fetch -q origin "$REF"
-          git checkout -q FETCH_HEAD
-          git config --global user.name "floorhands CI"
-          git config --global user.email "ci@floorhands.invalid"
-          git config --global init.defaultBranch main
+          sudo -u fh -H env REF="$REF" REPO="$REPO" bash -euc '
+            git config --global user.name "floorhands CI"
+            git config --global user.email "ci@floorhands.invalid"
+            git config --global init.defaultBranch main
+            git clone -q "https://github.com/$REPO" "$HOME/fh"
+            cd "$HOME/fh"
+            git fetch -q origin "$REF"
+            git checkout -q FETCH_HEAD
+            git log --oneline -1'
 
-      - name: Node 22 inside WSL2
+      - name: npm test inside WSL2 (as the normal user)
+        shell: wsl-bash {0}
+        run: sudo -u fh -H bash -euc 'cd "$HOME/fh" && id -un && npm test'
+
+      # Claude Code at the version the probe baseline was recorded with, so a new release cannot turn an unrelated PR red
+      # (the Permission probes workflow follows new releases).
+      - name: Permission probes inside WSL2 (as the normal user, fake model, no key)
         shell: wsl-bash {0}
         run: |
           set -eu
-          v=v22.11.0
-          curl -fsSL "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" -o /tmp/node.tar.xz
-          sudo tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
-          node --version
-
-      # Ubuntu 24.04 restricts the user namespaces bubblewrap needs; lift it on this throwaway machine only.
-      - name: Let bubblewrap create user namespaces
-        shell: wsl-bash {0}
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-
-      - name: npm test inside WSL2
-        shell: wsl-bash {0}
-        run: cd "$HOME/fh" && npm test
-
-      - name: Permission probes inside WSL2 (fake model, no key)
-        shell: wsl-bash {0}
-        run: |
-          set -eu
-          cd "$HOME/fh"
-          sudo npm install -g -q @anthropic-ai/claude-code
-          claude --version
-          node scripts/spike-claude.mjs --fake-model --out probe-results/wsl2 || echo "probe script exited $?; the comparison decides"
-          node scripts/probe-compare.mjs probe-results/wsl2.json docs/spike-results-0.3.0.json
+          v=$(sudo -u fh -H bash -c 'cd "$HOME/fh" && node -p "require(\"./docs/spike-results-0.3.0.json\").claudeVersion.split(\" \")[0]"')
+          echo "Claude Code $v"
+          printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          npm install -g -q "@anthropic-ai/claude-code@$v"
+          sudo -u fh -H bash -euc '
+            cd "$HOME/fh"
+            claude --version
+            node scripts/spike-claude.mjs --fake-model --out probe-results/wsl2 || echo "probe script exited $?; the comparison decides"
+            node scripts/probe-compare.mjs probe-results/wsl2.json docs/spike-results-0.3.0.json'
