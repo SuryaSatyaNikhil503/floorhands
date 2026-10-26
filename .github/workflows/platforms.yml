@@ -59,6 +59,8 @@ jobs:
         env:
           REF: ${{ github.ref }}
           REPO: ${{ github.repository }}
+          # Windows environment variables reach a WSL distribution only when WSLENV names them.
+          WSLENV: REF/u:REPO/u
         run: |
           set -eu
           grep -i wsl2 /proc/version
