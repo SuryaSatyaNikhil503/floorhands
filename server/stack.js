@@ -318,8 +318,8 @@ function gitEntries(root) {
   };
   let r = run(ALL_LAYERS);
   // git before 2.44 (Ubuntu 24.04 ships 2.43, the default WSL distribution) does not know the --no-lazy-fetch option and refuses to run.
-  // Retry without that one option: the environment switch and the per-transport ban stay, and the layer-by-layer test proves each
-  // of them blocks every hostile fixture on its own (it runs on git 2.43 in the WSL2 CI job).
+  // Retry without that one option. The per-transport ban stays, and on its own it blocks every hostile fixture (the layer-by-layer
+  // test). The GIT_NO_LAZY_FETCH switch stays too; Ubuntu's patched 2.43 honours it, but an unpatched git before 2.44 may ignore it.
   if (!r.error && r.status !== 0 && /no-lazy-fetch/.test(String(r.stderr))) r = run(OLD_GIT_LAYERS);
   // A timeout or an oversized listing still leaves the entries read so far; any other failure means "not usable".
   if (r.error ? !r.stdout : r.status !== 0) return null;

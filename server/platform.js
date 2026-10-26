@@ -34,7 +34,7 @@ export const isWsl1 = release => /-Microsoft$/.test(String(release ?? '').trim()
 // Can bubblewrap actually create its sandbox here? Ubuntu 24.04's AppArmor restriction makes it fail unless a bwrap profile is
 // installed, so the sysctl alone cannot tell; trying it can.
 export function bwrapWorks() {
-  try { return spawnSync('bwrap', ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-user', '--', '/bin/true'], { stdio: 'ignore', timeout: 10_000 }).status === 0; } catch { return false; }
+  try { return spawnSync('bwrap', ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-user', '--', '/bin/true'], { stdio: 'ignore', timeout: 3_000 }).status === 0; } catch { return false; }
 }
 
 // FLOORHANDS_PLATFORM_CHECK=off skips this check (for developing floorhands itself on a machine without the sandbox, with the fake

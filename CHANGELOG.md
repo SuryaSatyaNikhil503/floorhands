@@ -12,7 +12,7 @@ All notable changes to floorhands are recorded here. The format follows [Keep a 
 
 ### Fixed
 
-- On git before 2.44 (Ubuntu 24.04, the default WSL distribution, ships 2.43) the project scan fell back to a plain folder walk, because git refused the `--no-lazy-fetch` option, so project facts counted git-ignored files. The scan now retries without that one option, keeping the other two protections, each of which blocks every hostile fixture on its own. Found by the new WSL2 CI job.
+- On git before 2.44 (Ubuntu 24.04, the default WSL distribution, ships 2.43) the project scan fell back to a plain folder walk, because git refused the `--no-lazy-fetch` option, so project facts counted git-ignored files. The scan now retries without that one option. The per-transport ban stays and blocks every hostile fixture on its own. The `GIT_NO_LAZY_FETCH` switch stays as well, though an unpatched git before 2.44 may ignore it. Found by the new WSL2 CI job.
 
 ## [0.3.0] - 2026-10-26
 
