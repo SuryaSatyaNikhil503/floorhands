@@ -21,19 +21,21 @@ const plan = steps => `${F}json\n${JSON.stringify({ summary: 'the plan', steps }
 
 const NO_NOTES = () => ({ path: '', text: '', bytes: 0, truncated: false });
 function setup({ planText, outputs = {}, diffStat = ' a.js | 1 +', failOn = null, wtOverrides = {}, gate = null, emitText = null, emitFn = null,
-  roster: team = roster, detect = () => undefined, loadNotesFn = NO_NOTES, base = 'abc' } = {}) {
+  roster: team = roster, detect = () => undefined, loadNotesFn = NO_NOTES, base = 'abc', metrics = null, policy, failWith = null, savePatch = null,
+  meter = null, onRun = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floorhands-orch-'));
   roots.push(root);
   const calls = [];
   const runner = async o => {
-    calls.push({ agent: o.agent.id, cwd: o.cwd, prompt: o.prompt, system: o.system });
+    calls.push({ agent: o.agent.id, cwd: o.cwd, prompt: o.prompt, system: o.system, model: o.model, effort: o.effort, fallback: o.fallback, budgetUsd: o.budgetUsd });
     if (gate && o.agent.id === 'arch') await gate;
-    if (failOn === o.agent.id) throw new Error('boom');
+    if (onRun) await onRun(o);
+    if (failOn === o.agent.id) throw Object.assign(new Error(failWith ?? 'boom'), metrics ? { metrics: metrics(o) } : {});
     o.onEvent({ type: 'tool', name: 'Read', input: 'x' });
     if (emitText) o.onEvent({ type: 'text', text: emitText });
     const out = outputs[o.agent.id];
     const text = o.agent.id === 'arch' ? planText : typeof out === 'function' ? out(calls.length) : (out ?? `${o.agent.id} done`);
-    return { text, tools: ['Read'] };
+    return { text, tools: ['Read'], ...(metrics ? { metrics: metrics(o) } : {}) };
   };
   const log = [];
   const wt = {
@@ -46,7 +48,8 @@ function setup({ planText, outputs = {}, diffStat = ' a.js | 1 +', failOn = null
     ...wtOverrides,
   };
   const events = [];
-  const orch = createOrchestrator({ root, roster: team, store, runner, wt, emit: emitFn ?? (e => events.push(e)), detect, loadNotesFn });
+  const st = savePatch ? { ...store, savePatch } : store;
+  const orch = createOrchestrator({ root, roster: team, store: st, runner, wt, emit: emitFn ?? (e => events.push(e)), detect, loadNotesFn, ...(policy ? { policy } : {}), ...(meter ? { meter } : {}) });
   return { root, orch, calls, log, events };
 }
 
@@ -599,4 +602,304 @@ test('a planner step turn receives the facts in its prompt through the orchestra
   await s.orch.run(store.createTask(s.root, 'x').id);
   assert.match(s.calls[0].prompt, /no runnable test script/i);
   assert.match(s.calls[0].prompt, /builders can only edit/i);
+});
+
+// ---------- model routing, budgets and the 0.3.0 records ----------
+import { mergePolicy } from '../server/models.js';
+
+const ranged = (() => {
+  const mk = (id, tier, model, extra = {}) => ({ id, name: id.toUpperCase(), role: id, pod: 'p', tier, system: `SYS-${id}`, model, ...extra });
+  const F_ = { default: 'frontier', min: 'frontier', max: 'frontier' };
+  const agents = [mk('arch', 'read', F_, { router: true }), mk('rfe', 'read', F_), mk('fe', 'build', { default: 'standard', min: 'light', max: 'frontier' }),
+    mk('e2e', 'test', { default: 'light', min: 'light', max: 'standard' })];
+  return { pods: [], agents, byId: Object.fromEntries(agents.map(a => [a.id, a])), router: agents[0] };
+})();
+const cost = usd => o => ({ model: `real-${o.model}`, costUsd: usd, inputTokens: 100, outputTokens: 10, cacheReadTokens: 50, cacheWriteTokens: 0, cliVersion: '2.1.310' });
+
+test('each step runs on the class the plan gave it, clamped to the agent range, and the route is recorded', async () => {
+  const s = setup({
+    roster: ranged, metrics: cost(0.1),
+    planText: plan([{ agent: 'fe', task: 'Docs', class: 'light' }, { agent: 'rfe', task: 'Review', class: 'light' }, { agent: 'e2e', task: 'Test', class: 'frontier' }]),
+  });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.deepEqual(s.calls.map(c => [c.agent, c.model, c.effort]), [['arch', 'opus', 'high'], ['fe', 'haiku', 'low'], ['rfe', 'opus', 'high'], ['e2e', 'sonnet', 'medium']]);
+  const done = store.getTask(s.root, t.id);
+  assert.deepEqual(done.steps.map(x => [x.route.class, x.route.requested]), [['light', 'light'], ['frontier', 'light'], ['standard', 'frontier']]);
+  assert.equal(done.planner.route.model, 'opus');
+  assert.match(done.planner.promptHash, /^[0-9a-f]{12}$/);
+  assert.equal(done.steps[0].metrics.model, 'real-haiku');
+});
+
+test('totals add up cost and tokens per model that actually ran; the CLI version is recorded once', async () => {
+  const s = setup({ roster: ranged, metrics: cost(0.25), planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'rfe', task: 'B' }]) });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const { totals, cliVersion } = store.getTask(s.root, t.id);
+  assert.equal(totals.costUsd, 0.75);
+  assert.equal(totals.runs, 3);
+  assert.equal(totals.inputTokens, 300);
+  assert.equal(totals.cacheReadTokens, 150);
+  assert.deepEqual(totals.byModel, { 'real-opus': { runs: 2, costUsd: 0.5 }, 'real-sonnet': { runs: 1, costUsd: 0.25 } });
+  assert.equal(cliVersion, '2.1.310');
+});
+
+test('a step never gets more budget than the task has left, and the task stops at its cap', async () => {
+  // The Architect's run counts too: $0.60 of $1 leaves $0.40 for the first builder step, which then overspends, so step two never starts.
+  const policy = mergePolicy({ taskBudgetUsd: 1 });
+  const s = setup({ roster: ranged, policy, metrics: cost(0.6), planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'fe', task: 'B' }]) });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.deepEqual(s.calls.map(c => [c.agent, c.budgetUsd]), [['arch', 1], ['fe', 0.4]]);
+  const stopped = store.getTask(s.root, t.id);
+  assert.equal(stopped.status, 'failed');
+  assert.match(stopped.error, /spending cap of \$1 before the FE step/);
+  assert.equal(stopped.totals.costUsd, 1.2);
+});
+
+test('a failed run still counts its cost', async () => {
+  const s = setup({ roster: ranged, metrics: cost(0.3), failOn: 'fe', failWith: 'FE stopped at its spending cap', planText: plan([{ agent: 'fe', task: 'A' }]) });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'failed');
+  assert.equal(done.totals.costUsd, 0.6);
+  assert.equal(done.steps[0].metrics.costUsd, 0.3);
+});
+
+test('only one task runs at a time by default; the next waits as queued', async () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const s = setup({ planText: '{"summary":"s","steps":[]}', gate });
+  const a = store.createTask(s.root, 'a');
+  const b = store.createTask(s.root, 'b');
+  const ra = s.orch.run(a.id);
+  const rb = s.orch.run(b.id);
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(store.getTask(s.root, b.id).status, 'queued');
+  assert.equal(s.calls.length, 1);
+  release();
+  await ra; await rb;
+  assert.equal(store.getTask(s.root, b.id).status, 'done');
+});
+
+test('the raw plan is kept (redacted) along with any plan problems', async () => {
+  const raw = `thinking... token "ghp_${'a'.repeat(36)}"\n${plan([{ agent: 'fe', task: 'A', class: 'huge' }])}`;
+  const s = setup({ planText: raw });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.match(done.planRaw, /"steps"/);
+  assert.doesNotMatch(done.planRaw, /ghp_a/);
+  assert.ok(done.planProblems.some(p => /unknown class/.test(p)));
+});
+
+test('agent output is redacted before it is stored or handed to the next agent', async () => {
+  const secret = 'AKIAABCDEFGHIJKLMNOP';
+  const s = setup({ planText: plan([{ agent: 'rfe', task: 'A' }, { agent: 'rfe', task: 'B' }]), outputs: { rfe: `found ${secret} in config.js` }, emitText: `saw ${secret}` });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.doesNotMatch(JSON.stringify(done), new RegExp(secret));
+  assert.doesNotMatch(s.calls[2].prompt, new RegExp(secret));
+});
+
+test('a test step is skipped when a builder changed the package.json scripts', async () => {
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'e2e', task: 'Test' }]), wtOverrides: { scriptsChanged: async () => true } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.deepEqual(s.calls.map(c => c.agent), ['arch', 'fe']);
+  assert.equal(done.steps[1].status, 'skipped');
+  assert.match(done.steps[1].output, /changed how the tests run \(package\.json\)/);
+  assert.ok(done.riskFlags.some(f => f.flag === 'test-skipped-scripts-changed'));
+  assert.equal(done.status, 'awaiting_approval');
+});
+
+test('risk flags for the changed files are attached when the task waits for approval', async () => {
+  const s = setup({
+    planText: plan([{ agent: 'fe', task: 'A' }]),
+    wtOverrides: { changedFiles: async () => ['src/a.js', '.husky/pre-commit'], riskFlags: files => files.filter(f => f.startsWith('.husky')).map(path => ({ flag: 'git-hooks', path })) },
+  });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.deepEqual(store.getTask(s.root, t.id).riskFlags, [{ flag: 'git-hooks', path: '.husky/pre-commit' }]);
+});
+
+test('reject keeps the patch and a reason from a closed list; approve records the merge sha', async () => {
+  const kept = [];
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }]), savePatch: (r, id, text) => { kept.push(text); return `/p/${id}.patch`; },
+    wtOverrides: { approve: async () => ({ mergeSha: 'f'.repeat(40), hooksSkipped: false }) } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  await assert.rejects(s.orch.reject(t.id, { reason: 'meh' }), /Unknown reject reason/);
+  await s.orch.reject(t.id, { reason: 'too-big', note: `split it; key "sk-ant-${'z'.repeat(30)}"` });
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'rejected');
+  assert.equal(done.rejectReason.reason, 'too-big');
+  assert.doesNotMatch(done.rejectReason.note, /sk-ant-z/);
+  assert.equal(done.patch, `/p/${t.id}.patch`);
+  assert.deepEqual(kept, ['DIFF']);
+
+  const t2 = store.createTask(s.root, 'y');
+  await s.orch.run(t2.id);
+  await s.orch.approve(t2.id);
+  assert.equal(store.getTask(s.root, t2.id).mergeSha, 'f'.repeat(40));
+});
+
+test('a failed task keeps its patch before the worktree is removed', async () => {
+  const kept = [];
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'rfe', task: 'B' }]), failOn: 'rfe', savePatch: (r, id, text) => { kept.push(text); return '/p.patch'; } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.deepEqual(kept, ['DIFF']);
+  assert.equal(store.getTask(s.root, t.id).patch, '/p.patch');
+  assert.ok(s.log.indexOf('reject') > -1);
+});
+
+test('the plan prompt asks for a model class per step', () => {
+  const p = planPrompt('x', roster, undefined);
+  assert.match(p, /"class": "light\|standard\|frontier"/);
+  assert.match(p, /floorhands clamps to it/);
+});
+
+
+// ---------- the spending guard asks the owner instead of overshooting ----------
+// A stand-in for server/meter.js: each run records its budget and lets the test runner trigger the "out of budget" question.
+function fakeMeter({ spendPerRun = 0.1 } = {}) {
+  const runs = [];
+  return {
+    runs,
+    open({ budgetUsd, ask }) {
+      const run = { url: 'http://meter', budgetUsd, ask, on: () => () => {}, close() {}, report: () => ({ meteredUsd: spendPerRun, budgetUsd: run.budgetUsd }) };
+      runs.push(run);
+      return run;
+    },
+  };
+}
+const until = async (fn, ms = 2000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('timed out'); };
+
+test('a step that runs out of budget pauses the task as needs_budget; allowing more lets it finish', async () => {
+  const meter = fakeMeter();
+  const s = setup({
+    roster: ranged, meter, planText: plan([{ agent: 'fe', task: 'A' }]),
+    onRun: async o => {
+      if (o.agent.id !== 'fe') return;
+      const answer = await o.meter.ask({ spentUsd: 1.9, budgetUsd: 2, neededUsd: 0.7 });
+      if (answer.stop) throw new Error('stopped');
+    },
+  });
+  const t = store.createTask(s.root, 'x');
+  const running = s.orch.run(t.id);
+  await until(() => store.getTask(s.root, t.id).status === 'needs_budget');
+  const waiting = store.getTask(s.root, t.id);
+  assert.deepEqual({ ...waiting.budgetRequest, at: undefined }, { kind: 'step', agent: 'fe', agentName: 'FE', spentUsd: 1.9, budgetUsd: 2, neededUsd: 0.7, suggestedUsd: 1, at: undefined });
+  assert.throws(() => s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 500 }), /at most 100/);
+  assert.throws(() => s.orch.decideBudget(t.id, { decision: 'maybe' }), /allow" or "stop/);
+  s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 1 });
+  await running;
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'awaiting_approval');
+  assert.equal(done.extraBudgetUsd, 1);
+  assert.equal(done.budgetRequest, null);
+  assert.deepEqual(done.budgetDecisions.map(d => [d.agent, d.kind, d.decision, d.extraUsd, d.by]), [['fe', 'step', 'allow', 1, 'owner']]);
+  assert.throws(() => s.orch.decideBudget(t.id, { decision: 'stop' }), /not waiting/);
+});
+
+test('stopping at the cap fails the step, and nothing more is spent', async () => {
+  const meter = fakeMeter();
+  const s = setup({
+    roster: ranged, meter, planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'rfe', task: 'B' }]),
+    onRun: async o => { if (o.agent.id === 'fe' && (await o.meter.ask({ spentUsd: 2, budgetUsd: 2, neededUsd: 1 })).stop) throw new Error('the owner stopped this step at its spending cap'); },
+  });
+  const t = store.createTask(s.root, 'x');
+  const running = s.orch.run(t.id);
+  await until(() => store.getTask(s.root, t.id).status === 'needs_budget');
+  s.orch.decideBudget(t.id, { decision: 'stop' });
+  await running;
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'failed');
+  assert.match(done.error, /owner stopped this step/);
+  assert.deepEqual(s.calls.map(c => c.agent), ['arch', 'fe'], 'the reviewer never ran');
+});
+
+test('with the guard on, every run gets a metered budget, the CLI cap is not used, and totals use the metered spend', async () => {
+  const meter = fakeMeter({ spendPerRun: 0.25 });
+  const s = setup({ roster: ranged, meter, planText: plan([{ agent: 'fe', task: 'A', class: 'light' }]), metrics: () => ({ model: 'm', costUsd: 9 }) });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.deepEqual(meter.runs.map(r => r.budgetUsd), [5, 0.5], 'architect frontier cap, then the light step cap');
+  assert.equal(store.getTask(s.root, t.id).totals.costUsd, 0.5, 'metered spend, not the CLI estimate of $9 per run');
+});
+
+test('when the whole task reaches its cap, the owner is asked before the next step, not after', async () => {
+  const meter = fakeMeter({ spendPerRun: 0.6 });
+  const s = setup({ roster: ranged, meter, policy: mergePolicy({ taskBudgetUsd: 1 }), planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'fe', task: 'B' }]) });
+  const t = store.createTask(s.root, 'x');
+  const running = s.orch.run(t.id);
+  await until(() => store.getTask(s.root, t.id).status === 'needs_budget');
+  const q = store.getTask(s.root, t.id);
+  assert.equal(q.budgetRequest.kind, 'task');
+  assert.equal(s.calls.length, 2, 'architect and step one ran; step two waits');
+  s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 2 });
+  await running;
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'awaiting_approval');
+  assert.equal(s.calls.length, 3);
+  assert.equal(meter.runs[2].budgetUsd, 1.8, 'the last step gets what is left of $1 + $2 allowed');
+});
+
+
+test('review #8: a changed .npmrc or test-runner config also skips the tester', async () => {
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'e2e', task: 'Test' }]),
+    wtOverrides: { scriptsChanged: async () => false, changedFiles: async () => ['src/a.js', '.npmrc', 'vitest.config.ts'], changesTestDefinition: (await import('../server/worktree.js')).changesTestDefinition } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.steps[1].status, 'skipped');
+  assert.match(done.steps[1].output, /\.npmrc, vitest\.config\.ts/);
+  assert.deepEqual(s.calls.map(c => c.agent), ['arch', 'fe']);
+});
+
+test('review #8: an ordinary source and test change still gets tested', async () => {
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }, { agent: 'e2e', task: 'Test' }]),
+    wtOverrides: { scriptsChanged: async () => false, changedFiles: async () => ['src/a.js', 'test/a.test.js'], changesTestDefinition: (await import('../server/worktree.js')).changesTestDefinition } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.deepEqual(s.calls.map(c => c.agent), ['arch', 'fe', 'e2e']);
+});
+
+test('review #10: a budget question left open when its run ends is cancelled and does not revive the task', async () => {
+  const meter = fakeMeter();
+  const s = setup({ roster: ranged, meter, planText: plan([{ agent: 'fe', task: 'A' }]),
+    // The run asks, then ends on its own (the CLI exits) without waiting for the answer.
+    onRun: async o => { if (o.agent.id === 'fe') { o.meter.ask({ spentUsd: 2, budgetUsd: 2, neededUsd: 1 }); throw new Error('cli exited'); } } });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  const done = store.getTask(s.root, t.id);
+  assert.equal(done.status, 'failed');
+  assert.equal(done.budgetRequest, null);
+  assert.equal(done.budgetDecisions.at(-1).by, 'run-ended');
+  assert.throws(() => s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 1 }), /not waiting/);
+});
+
+test('review #11: an allowance that rounds to zero cents is refused, not read as stop', async () => {
+  const meter = fakeMeter();
+  let resolveAsk;
+  const s = setup({ roster: ranged, meter, planText: plan([{ agent: 'fe', task: 'A' }]),
+    onRun: async o => { if (o.agent.id === 'fe') { const a = await o.meter.ask({ spentUsd: 2, budgetUsd: 2, neededUsd: 1 }); resolveAsk = a; if (a.stop) throw new Error('stopped'); } } });
+  const t = store.createTask(s.root, 'x');
+  const running = s.orch.run(t.id);
+  await until(() => store.getTask(s.root, t.id).status === 'needs_budget');
+  assert.throws(() => s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 0.004 }), /at least 0\.01/);
+  s.orch.decideBudget(t.id, { decision: 'allow', extraUsd: 0.015 });
+  await running;
+  assert.deepEqual(resolveAsk, { allowUsd: 0.02 });
+});
+
+test('review #9: a failure message is redacted before it is stored', async () => {
+  const s = setup({ planText: plan([{ agent: 'fe', task: 'A' }]), failOn: 'fe', failWith: 'claude exited 1: token="ghp_' + 'a'.repeat(36) + '"' });
+  const t = store.createTask(s.root, 'x');
+  await s.orch.run(t.id);
+  assert.doesNotMatch(store.getTask(s.root, t.id).error, /ghp_a/);
 });

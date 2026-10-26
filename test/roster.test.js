@@ -66,7 +66,8 @@ test('publicAgent hides the system prompt and lists skill names', () => {
   assert.equal(a.system, undefined);
   assert.equal(a.parts, undefined);
   assert.ok(a.skills.every(n => typeof n === 'string'));
-  assert.deepEqual(Object.keys(a).sort(), ['id', 'lead', 'name', 'pod', 'role', 'router', 'skills', 'tier']);
+  assert.deepEqual(Object.keys(a).sort(), ['id', 'lead', 'model', 'name', 'pod', 'role', 'router', 'skills', 'tier']);
+  assert.deepEqual(a.model, { default: 'standard', min: 'light', max: 'frontier' });
 });
 
 const good = () => ({

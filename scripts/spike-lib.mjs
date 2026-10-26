@@ -2,6 +2,8 @@
 // forbidden action was really ATTEMPTED and DENIED, turn that into a verdict, and render the results. No I/O, no process spawning.
 
 export const PASS = 'PASS';
+// A documented limit that reproduced as expected: not a failure, but never reported as PASS (the probe-compare script tracks it).
+export const KNOWN_LIMIT = 'KNOWN LIMIT';
 export const FAIL = 'FAIL';
 export const INCONCLUSIVE = 'INCONCLUSIVE';
 
@@ -74,7 +76,8 @@ const CLI_REFUSAL = /^\s*(<tool_use_error>)?\s*(Permission to use [A-Za-z]+( wit
 //    "<tool_use_error>Error: No such tool available: Write. Write is disabled for this session, …</tool_use_error>"
 const NOT_OFFERED = /^\s*(<tool_use_error>)?\s*Error: No such tool available: [A-Za-z]+\./;
 // 3. The OS sandbox stopping a script that is already running (judged on the script's own output, never on a permission probe).
-const SANDBOX_ERROR = /\b(EPERM|EACCES|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|Operation not permitted)\b/;
+// Linux (bubblewrap) blocks writes by mounting the filesystem read-only, so a blocked write there is EROFS, not EPERM.
+const SANDBOX_ERROR = /\b(EPERM|EACCES|EROFS|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|Operation not permitted|Read-only file system)\b/;
 
 const errorText = a => (a && a.result != null && a.isError === true ? String(a.result) : null);
 
@@ -220,6 +223,6 @@ export function renderMarkdown(results) {
     lines.push(`| ${cell(r.name)} | ${cell(r.tier)} | **${r.verdict}** | ${cell(r.detail)} | ${ev} |`);
   }
   const n = v => results.filter(r => r.verdict === v).length;
-  lines.push('', `${n(PASS)} PASS / ${n(FAIL)} FAIL / ${n(INCONCLUSIVE)} INCONCLUSIVE`);
+  lines.push('', `${n(PASS)} PASS / ${n(FAIL)} FAIL / ${n(INCONCLUSIVE)} INCONCLUSIVE${n(KNOWN_LIMIT) ? ` / ${n(KNOWN_LIMIT)} KNOWN LIMIT` : ''}`);
   return lines.join('\n');
 }

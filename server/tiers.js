@@ -5,7 +5,8 @@
 // Known limits (prefix rules cannot close these):
 // - `npm run <script>` and `npm test` execute whatever project scripts package.json defines. For build and test tiers they run inside
 //   Claude Code's Bash sandbox (BASH_SANDBOX_SETTINGS): no network, no writes outside the working directory.
-// - `git diff`, `git log` and `git show` may run repo-configured diff.external / textconv programs.
+// - `git diff`, `git log` and `git show` may run repo-configured diff.external / textconv programs. Since 0.3.0 the read tier runs its
+//   Bash in the same sandbox as build and test, so such a program has no network and cannot write outside the working directory.
 // - Read deny rules cover the file tools and the file commands the CLI recognises; a command that reads files without naming them
 //   (`grep -r`) is not covered, which is why grep-like commands are denied outright. The sandbox does not block reads inside the repo.
 
@@ -54,6 +55,8 @@ const NEVER = [
 const GIT_FLAG_DENIES = ['git * --output*', 'git * --no-index*', 'git * --ext-diff*', 'git * --textconv*'];
 // Secret files the Read/Edit tools must never touch. The Bash sandbox has its own read-deny list (SANDBOX_READ_DENY) for build/test.
 const SECRET_READS = ['**/.env*', '**/*.pem',
+  // floorhands' own state: server.json holds the run's access token (which can approve budgets and start tasks).
+  '**/.floorhands/**',
   // Home-directory credential stores that are not otherwise denied. A read agent (no sandbox) could Read these directly; add them so
   // the Read tool refuses (spike: cred-read-tier-denied, run with the same rules re-expressed for a throwaway fake home).
   '~/.aws/**', '~/.ssh/**', '~/.config/gh/**', '~/.config/gcloud/**', '~/.npmrc', '~/.netrc', '~/.docker/config.json',
@@ -93,6 +96,14 @@ const SANDBOX_READ_DENY = [
   '~/.kube', '~/.git-credentials', '~/.gnupg', '~/.azure', '~/.pypirc', '~/.gem/credentials', '~/.password-store',
   '~/.claude', '~/Library/Keychains'];
 
+// Session settings every agent runs with (merged into the same --settings JSON as the sandbox). Measured with the real CLI through a
+// local fake API (scripts/fake-anthropic.mjs), 2.1.310:
+// - autoMemoryEnabled: false. The auto-memory section names a folder derived from the working directory, so every worktree got a
+//   different system prompt and nothing after it could be read from the prompt cache. Agents cannot write memory anyway.
+// - disableAllHooks: true. The owner's plugin hooks ran in every agent session, outside the sandbox (known limit 6 in 0.3.0), and their
+//   SessionStart output (about 10k tokens with a few common plugins) was added to every agent's conversation.
+export const AGENT_SESSION_SETTINGS = deepFreeze({ autoMemoryEnabled: false, disableAllHooks: true });
+
 export const BASH_SANDBOX_SETTINGS = deepFreeze({
   sandbox: {
     enabled: true,
@@ -104,8 +115,22 @@ export const BASH_SANDBOX_SETTINGS = deepFreeze({
   },
 });
 
+const guardEnv = url => (typeof url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/r\/[a-f0-9]{32}$/.test(url) ? { env: { ANTHROPIC_BASE_URL: url } } : {});
+const cleanAbs = list => (Array.isArray(list) ? list : []).filter(p => typeof p === 'string' && p.startsWith('/') && !p.includes('\0') && !/[()]/.test(p));
+// Claude Code reads a rule path starting with "//" as an absolute filesystem path.
+function absoluteDenies(denyRead) {
+  return cleanAbs(denyRead).flatMap(p => [`Read(/${p}/**)`, `Read(/${p})`, `Edit(/${p}/**)`, `Edit(/${p})`]);
+}
+
+function sandboxSettings(denyRead) {
+  const extra = cleanAbs(denyRead);
+  if (!extra.length) return { ...AGENT_SESSION_SETTINGS, ...BASH_SANDBOX_SETTINGS };
+  const sb = BASH_SANDBOX_SETTINGS.sandbox;
+  return { ...AGENT_SESSION_SETTINGS, sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: [...sb.filesystem.denyRead, ...extra] } } };
+}
+
 export const TIERS = deepFreeze({
-  read: { tools: READ_TOOLS, allow: [...FILE_READ, ...GIT_READ.map(bash)], sandbox: false },
+  read: { tools: READ_TOOLS, allow: [...FILE_READ, ...GIT_READ.map(bash)], sandbox: true },
   build: { tools: [...READ_TOOLS, 'Edit', 'Write'], allow: [...FILE_READ, EDIT_IN_WORKDIR, ...GIT_READ.map(bash), ...BUILD_CMDS.map(bash)], sandbox: true },
   test: { tools: READ_TOOLS, allow: [...FILE_READ, ...GIT_READ.map(bash), ...TEST_CMDS.map(bash)], sandbox: true },
 });
@@ -122,10 +147,32 @@ export function denyRules() {
   ];
 }
 
-export function buildClaudeArgs({ agent, system, model }) {
+// What may follow --model / --fallback-model: an alias or a plain model id, never anything that starts with a dash.
+export const MODEL_NAME = /^(?:opus|sonnet|haiku|fable|default|claude-[a-z0-9][a-z0-9.-]{0,63})(?:\[1m\])?$/;
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// `system` (inline, kept for the probe script) or `systemFile` (a 0600 file; what the server uses, so owner notes and project facts
+// never appear in the process list). Model, effort, fallback and budget come from server/models.js and are re-checked here because
+// they end up in argv.
+// `skills: false` (the default) also turns off the owner's skills: their listing alone was about 7k tokens per run, and an agent
+// only ever uses the few skills its roster entry hints at for this project. The orchestrator passes `skills: true` only then.
+// `denyRead`: extra absolute paths no agent may read: the sandbox denies them to scripts, and absolute Read/Edit rules deny them to
+// the file tools. A pattern like '**/.floorhands/**' is relative to the working directory, so it does not cover the project's
+// .floorhands folder for agents working in a worktree elsewhere (review finding: a build agent read the server token by its path).
+// `baseUrl`: the spending guard's address. It also goes into the --settings env, because settings from the command line outrank the
+// owner's user settings: an ANTHROPIC_BASE_URL in ~/.claude/settings.json would otherwise send traffic around the guard.
+export function buildClaudeArgs({ agent, system, systemFile, model, effort, fallback, budgetUsd, skills = false, denyRead = [], baseUrl }) {
   if (!agent || !Object.hasOwn(TIERS, agent.tier)) throw new Error(`unknown tier "${agent?.tier}"`);
-  if (typeof system !== 'string' || system.trim() === '') {
+  if (systemFile !== undefined) {
+    if (typeof systemFile !== 'string' || !systemFile.startsWith('/')) throw new Error('system prompt file must be an absolute path');
+  } else if (typeof system !== 'string' || system.trim() === '') {
     throw new Error('system prompt must be a non-empty string');
+  }
+  if (model !== undefined && model !== null && !MODEL_NAME.test(String(model))) throw new Error(`invalid model "${model}"`);
+  if (fallback !== undefined && fallback !== null && !MODEL_NAME.test(String(fallback))) throw new Error(`invalid fallback model "${fallback}"`);
+  if (effort !== undefined && effort !== null && !EFFORT_LEVELS.includes(effort)) throw new Error(`invalid effort "${effort}"`);
+  if (budgetUsd !== undefined && budgetUsd !== null && !(typeof budgetUsd === 'number' && Number.isFinite(budgetUsd) && budgetUsd > 0)) {
+    throw new Error('budget must be a positive number of dollars');
   }
   const tier = TIERS[agent.tier];
   const args = [
@@ -139,10 +186,17 @@ export function buildClaudeArgs({ agent, system, model }) {
     '--strict-mcp-config', // no --mcp-config is ever passed, so agents get no MCP servers (not the owner's Gmail, Drive, ...)
     '--tools', ...tier.tools,
     '--allowedTools', ...tier.allow,
-    '--disallowedTools', ...denyRules(),
-    '--append-system-prompt', system,
+    '--disallowedTools', ...denyRules(), ...absoluteDenies(denyRead),
+    ...(systemFile !== undefined ? ['--append-system-prompt-file', systemFile] : ['--append-system-prompt', system]),
+    // The working directory, environment and git status go into the first message instead of the system prompt, so the system
+    // prompt is the same in every folder and can be shared through the prompt cache.
+    '--exclude-dynamic-system-prompt-sections',
+    '--settings', JSON.stringify({ ...(tier.sandbox ? sandboxSettings(denyRead) : AGENT_SESSION_SETTINGS), ...guardEnv(baseUrl) }),
   ];
-  if (tier.sandbox) args.push('--settings', JSON.stringify(BASH_SANDBOX_SETTINGS));
+  if (!skills) args.push('--disable-slash-commands');
   if (model) args.push('--model', model);
+  if (fallback && fallback !== model) args.push('--fallback-model', fallback);
+  if (effort) args.push('--effort', effort);
+  if (budgetUsd) args.push('--max-budget-usd', String(budgetUsd));
   return args;
 }

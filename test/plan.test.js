@@ -102,3 +102,10 @@ test('non-string text throws the "did not return a plan" error', () => {
 test('validIds that is not an array throws', () => {
   assert.throws(() => parsePlan('{"summary":"s","steps":[]}', 'fe'), /parsePlan needs a list of valid agent ids/);
 });
+
+test('a known model class is kept per step; an unknown one is dropped with a problem', () => {
+  const text = `${F}json\n{"summary":"s","steps":[{"agent":"fe","task":"Docs","class":"light"},{"agent":"rfe","task":"Review","class":"enormous"},{"agent":"e2e","task":"Test"}]}\n${F}`;
+  const p = parsePlan(text, ids);
+  assert.deepEqual(p.steps, [{ agent: 'fe', task: 'Docs', class: 'light' }, { agent: 'rfe', task: 'Review' }, { agent: 'e2e', task: 'Test' }]);
+  assert.ok(p.problems.some(x => /unknown class "enormous" ignored/.test(x)));
+});

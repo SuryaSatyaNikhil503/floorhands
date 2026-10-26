@@ -3,6 +3,7 @@ import path from 'node:path';
 import { TIERS } from './tiers.js';
 import { FACT_TAGS } from './stack.js';
 import { buildSystem } from './prompt.js';
+import { rosterModelProblems, agentRange } from './models.js';
 
 const TIER_NOTES = {
   read: 'Tier: READ-ONLY. You can read files, search, run read-only git commands and call skills. You cannot edit files or run other commands. Report findings; never claim to have changed anything.',
@@ -61,6 +62,7 @@ export function validateRoster(doc) {
     if (!Object.hasOwn(TIERS, a.tier)) problems.push(`agent "${a.id}" has unknown tier "${a.tier}"`);
     if (a.prompt && !PROMPT_FILE.test(a.prompt)) problems.push(`agent "${a.id}": prompt file name "${a.prompt}" must be a plain .md file name`);
     for (const p of skillProblems(a.skills)) problems.push(`agent "${a.id}": ${p}`);
+    for (const p of rosterModelProblems(a.model)) problems.push(`agent "${a.id}": ${p}`);
     if (a.lead) leads[a.pod] = (leads[a.pod] ?? 0) + 1;
     if (a.router) routers++;
   }
@@ -99,4 +101,5 @@ export function loadRoster(agentsDir) {
 
 export const publicAgent = a => ({
   id: a.id, name: a.name, role: a.role, pod: a.pod, lead: !!a.lead, router: !!a.router, tier: a.tier, skills: (a.skills ?? []).map(e => (typeof e === 'string' ? e : e.name)),
+  model: agentRange(a),
 });

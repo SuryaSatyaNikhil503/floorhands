@@ -14,7 +14,7 @@ export async function git(cwd, args) {
 
 // Every git call made INSIDE a floorhands worktree (whose config and .git link the agent can influence) runs with these,
 // so no owner-configured or agent-planted program (fsmonitor, hooks, ssh) can run in the server process.
-// Not used for the merge in approve(): that runs in the owner's repo, where the owner's hooks should run.
+// approve() goes further and runs the merge with no hooks at all (see there).
 export const SAFE_GIT = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.sshCommand=/bin/false'];
 
 async function gitOk(cwd, args) {
@@ -42,8 +42,9 @@ export async function createWorktree(root, taskId, { base = worktreeBase(root) }
   const branch = `floorhands/${taskId}`;
   const dir = path.join(path.resolve(base), taskId);
   fs.mkdirSync(base, { recursive: true });
-  const baseSha = (await git(root, ['rev-parse', 'HEAD'])).trim();
-  await git(root, ['worktree', 'add', '-b', branch, '--', dir, 'HEAD']);
+  const baseSha = (await git(root, [...SAFE_GIT, 'rev-parse', 'HEAD'])).trim();
+  // SAFE_GIT: `worktree add` checks files out, which runs post-checkout hooks and fsmonitor from the repository's config (known limit 15).
+  await git(root, [...SAFE_GIT, 'worktree', 'add', '-b', branch, '--', dir, 'HEAD']);
   const nm = path.join(root, 'node_modules');
   if (fs.existsSync(nm) && !fs.existsSync(path.join(dir, 'node_modules'))) fs.symlinkSync(nm, path.join(dir, 'node_modules'), 'dir');
   return { dir, branch, base: baseSha };
@@ -92,13 +93,67 @@ function assertBase(wt) {
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(String(wt?.base ?? ''))) throw new Error('invalid worktree record');
 }
 
+// The server's own diffs never run a diff.external or textconv program from the repository's config: they show the plain change.
+const PLAIN_DIFF = ['--no-ext-diff', '--no-textconv'];
 export async function diff(root, wt) {
   assertBase(wt);
-  return git(root, ['diff', `${wt.base}...${wt.branch}`, '--']);
+  return git(root, [...SAFE_GIT, 'diff', ...PLAIN_DIFF, `${wt.base}...${wt.branch}`, '--']);
 }
 export async function diffStat(root, wt) {
   assertBase(wt);
-  return git(root, ['diff', '--stat', `${wt.base}...${wt.branch}`, '--']);
+  return git(root, [...SAFE_GIT, 'diff', ...PLAIN_DIFF, '--stat', `${wt.base}...${wt.branch}`, '--']);
+}
+export async function changedFiles(root, wt) {
+  assertBase(wt);
+  const out = await git(root, [...SAFE_GIT, 'diff', '--name-only', '-z', `${wt.base}...${wt.branch}`, '--']);
+  return out.split('\0').filter(Boolean);
+}
+
+// Changes the owner should look at twice before approving: anything that decides what runs on their machine later (package scripts,
+// git hooks, CI, build config) rather than what the code does. Pure: a list of paths in, a list of { flag, path } out.
+const RISKY = [
+  ['package-manifest', /(^|\/)package\.json$/],
+  ['lockfile', /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/],
+  ['git-hooks', /(^|\/)(\.husky|\.githooks|\.git-hooks)\//],
+  ['git-attributes', /(^|\/)\.gitattributes$/],
+  ['ci', /^\.github\/(workflows|actions)\/|(^|\/)(\.gitlab-ci\.yml|\.circleci\/|Jenkinsfile$|azure-pipelines\.yml$)/],
+  ['package-config', /(^|\/)(\.npmrc|\.yarnrc(\.yml)?|\.pnpmfile\.cjs)$/],
+  ['build-config', /(^|\/)([\w.-]+\.config\.(c|m)?(j|t)s|Makefile|Dockerfile|docker-compose\.ya?ml|\.babelrc|tsconfig[\w.-]*\.json)$/],
+  ['agent-config', /(^|\/)(\.claude\/|\.mcp\.json$|CLAUDE\.md$|AGENTS\.md$)/],
+];
+export function riskFlags(files) {
+  const out = [];
+  for (const f of Array.isArray(files) ? files : []) {
+    for (const [flag, re] of RISKY) if (re.test(f)) { out.push({ flag, path: String(f).slice(0, 300) }); break; }
+  }
+  return out.slice(0, 50);
+}
+
+// Files that define HOW tests run (not what they test): package manager config and test-runner config. A builder changing one of
+// these would decide what `npm test` executes, so the tester's step is skipped. Test files themselves still run, in the sandbox.
+const TEST_DEFINITION = /(^|\/)(\.npmrc|\.yarnrc(\.yml)?|\.pnpmfile\.cjs|\.mocharc(\.[\w]+)?|(jest|vitest|vite|mocha|ava|playwright|cypress|karma|babel)\.config\.[\w.]+|\.babelrc(\.[\w]+)?)$/;
+// Ignored files never reach the commit, so changedFiles cannot see a builder that git-ignored an .npmrc and then wrote it.
+export async function ignoredFiles(wt) {
+  // --directory lists a wholly ignored folder (.next/, target/) as one entry: a huge ignored tree cannot overflow the output buffer,
+  // and files inside build folders are not mistaken for test setup.
+  const out = await git(wt.dir, [...SAFE_GIT, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', '--', '.']);
+  return out.split('\0').filter(f => f && !f.startsWith('node_modules'));
+}
+export const changesTestDefinition = files => (Array.isArray(files) ? files : []).filter(f => TEST_DEFINITION.test(String(f)));
+
+// Whether the "scripts" of the root package.json differ between the task's base commit and the worktree. A builder can rewrite what
+// `npm test` runs, so a test step after such a change would execute agent-written code: the orchestrator refuses that step.
+export async function scriptsChanged(wt) {
+  assertBase(wt);
+  const scripts = text => {
+    // Scripts plus the test-runner settings that can live inside package.json.
+    try { const j = JSON.parse(text); return JSON.stringify(['scripts', 'jest', 'mocha', 'ava', 'nyc', 'c8', 'vitest', 'babel'].map(k => j?.[k] ?? null)); } catch { return 'unparseable'; }
+  };
+  let before;
+  try { before = scripts(await git(wt.dir, [...SAFE_GIT, 'show', `${wt.base}:package.json`])); } catch { before = 'absent'; }
+  let after;
+  try { after = scripts(fs.readFileSync(path.join(wt.dir, 'package.json'), 'utf8')); } catch { after = 'absent'; }
+  return before !== after;
 }
 
 // A wt record is read back from a task file that can be hand-edited, so it is only trusted
@@ -131,8 +186,12 @@ export async function approve(root, wt, message, { base = worktreeBase(root) } =
   if (!(await gitOk(root, ['symbolic-ref', '-q', 'HEAD']))) {
     throw new Error(`Your repository is on a detached HEAD. Check out a branch, then approve again. The floorhands branch ${wt.branch} is kept.`);
   }
+  // The merge never runs hooks. They run after the merged files are in the working tree, and ordinary hooks load repository files
+  // an agent may have changed (commitlint.config.js, lefthook.yml, .pre-commit-config.yaml, package.json scripts through npm install),
+  // which would run agent-written code outside every sandbox. Run your hooks yourself after reviewing the merge if you need them.
+  const hookArgs = ['-c', 'core.hooksPath=/dev/null'];
   try {
-    await git(root, [...(await identityArgs(root)), 'merge', '--no-ff', '-m', message, '--', wt.branch]);
+    await git(root, [...hookArgs, ...(await identityArgs(root)), 'merge', '--no-ff', '--no-verify', '-m', message, '--', wt.branch]);
   } catch {
     // Only abort a merge our own attempt left behind; the owner's was ruled out above.
     if (await gitOk(root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])) {
@@ -140,8 +199,12 @@ export async function approve(root, wt, message, { base = worktreeBase(root) } =
     }
     throw new Error(`The merge did not apply cleanly (conflicts, or uncommitted changes in your working copy). Nothing was changed; the floorhands branch is kept as ${wt.branch}.`);
   }
+  let mergeSha = null;
+  try { mergeSha = (await git(root, [...SAFE_GIT, 'rev-parse', 'HEAD'])).trim(); } catch { /* recorded as unknown */ }
   await cleanup(root, wt);
+  return { mergeSha, hooksSkipped: true };
 }
+
 
 export async function reject(root, wt, { base = worktreeBase(root) } = {}) {
   assertOwned(wt, base);

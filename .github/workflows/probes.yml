@@ -1,0 +1,125 @@
+name: Permission probes
+
+# Re-runs the permission probes (scripts/spike-claude.mjs) whenever Claude Code ships a new version, and on any change to the
+# permission model, on macOS and Linux. A probe that passed in the committed baseline and does not pass now fails the run
+# (scripts/probe-compare.mjs).
+#
+# No API key, no login, no cost: --fake-model runs the REAL claude CLI (its permission checks, sandbox, hooks and settings loading)
+# against a local fake Anthropic API whose scripted worst-case model makes exactly the tool call each probe asks for.
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # daily: run only if a Claude Code version has appeared that these files were not yet probed on
+  workflow_dispatch:
+    inputs:
+      claude_version:
+        description: 'Claude Code version to probe (empty = latest)'
+        required: false
+  pull_request:
+    paths:
+      - server/tiers.js
+      - server/runner.js
+      - scripts/spike-claude.mjs
+      - scripts/fake-anthropic.mjs
+      - scripts/probe-model.mjs
+      - scripts/spike-lib.mjs
+      - scripts/probe-compare.mjs
+      - .github/workflows/probes.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    name: Which Claude Code version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tested: ${{ steps.seen.outputs.cache-hit }}
+      key: ${{ steps.v.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          WANTED: ${{ github.event.inputs.claude_version }}
+        run: |
+          version="${WANTED:-$(npm view @anthropic-ai/claude-code version)}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then echo "bad version: $version"; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "key=probed-$version-${{ hashFiles('server/tiers.js', 'server/runner.js', 'scripts/spike-claude.mjs', 'scripts/spike-lib.mjs', 'scripts/fake-anthropic.mjs', 'scripts/probe-model.mjs', 'scripts/probe-compare.mjs', 'docs/spike-results-0.3.0.json') }}" >> "$GITHUB_OUTPUT"
+      # A marker cached after a green run: the daily schedule skips a version and permission model it already probed.
+      - id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: .probed
+          key: ${{ steps.v.outputs.key }}
+          lookup-only: true
+
+  probes:
+    name: Probes on ${{ matrix.os }} (claude ${{ needs.resolve.outputs.version }})
+    needs: resolve
+    if: github.event_name != 'schedule' || needs.resolve.outputs.tested != 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure git
+        run: |
+          git config --global user.name "floorhands CI"
+          git config --global user.email "ci@floorhands.invalid"
+          git config --global init.defaultBranch main
+
+      # Claude Code's Bash sandbox on Linux needs bubblewrap and socat. Ubuntu 24.04 runners restrict unprivileged user namespaces
+      # through AppArmor, which bubblewrap needs; lift that on this throwaway runner only.
+      - name: Linux sandbox prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap socat
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Install Claude Code ${{ needs.resolve.outputs.version }}
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${{ needs.resolve.outputs.version }}"
+          claude --version
+
+      - name: Run the probes
+        # The script exits non-zero on any FAIL, including probes that only check the owner's installed skills (a runner has none).
+        # The comparison below is the gate: it knows which probes depend on the machine. A missing results file still fails it.
+        run: node scripts/spike-claude.mjs --fake-model --out "probe-results/${{ runner.os }}" || echo "probe script exited $?; the comparison decides"
+
+      - name: Compare with the committed baseline
+        run: node scripts/probe-compare.mjs "probe-results/${{ runner.os }}.json" docs/spike-results-0.3.0.json
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-results-${{ runner.os }}-${{ needs.resolve.outputs.version }}
+          path: probe-results/
+          if-no-files-found: ignore
+
+  remember:
+    name: Remember this version as probed
+    needs: [resolve, probes]
+    if: success() && needs.probes.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p .probed && echo "${{ needs.resolve.outputs.version }}" > .probed/version
+      - uses: actions/cache/save@v4
+        with:
+          path: .probed
+          key: ${{ needs.resolve.outputs.key }}

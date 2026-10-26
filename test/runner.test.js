@@ -261,3 +261,144 @@ test('only malformed lines rejects with the usual no-result error, not a TypeErr
   assert.ok(!(out.e instanceof TypeError));
   assert.match(out.e.message, /returned no result/);
 });
+
+test('the system prompt reaches the CLI as a private file, never in argv, and the file is gone afterwards', async () => {
+  const fs = await import('node:fs');
+  let seen;
+  const spawnFn = fakeSpawn({ lines: [ok('done')] });
+  const wrapped = (cmd, args, opts) => {
+    const i = args.indexOf('--append-system-prompt-file');
+    const file = args[i + 1];
+    seen = { file, text: fs.readFileSync(file, 'utf8'), mode: fs.statSync(file).mode & 0o777, dirMode: fs.statSync(file.replace(/\/[^/]+$/, '')).mode & 0o777 };
+    return spawnFn(cmd, args, opts);
+  };
+  await runAgent(base({ spawnFn: wrapped, system: 'OWNER NOTES: private' }));
+  const args = spawnFn.calls[0].args;
+  assert.ok(!args.includes('--append-system-prompt'));
+  assert.ok(!args.some(a => a.includes('OWNER NOTES')), 'the system prompt text is not on the command line');
+  assert.equal(seen.text, 'OWNER NOTES: private');
+  assert.equal(seen.mode, 0o600);
+  assert.equal(seen.dirMode, 0o700);
+  assert.equal(fs.existsSync(seen.file), false, 'removed after the run');
+});
+
+test('the system prompt file is removed when the run fails too', async () => {
+  const fs = await import('node:fs');
+  const spawnFn = fakeSpawn({ lines: [], code: 1, stderr: 'bad' });
+  await assert.rejects(runAgent(base({ spawnFn })));
+  const args = spawnFn.calls[0].args;
+  assert.equal(fs.existsSync(args[args.indexOf('--append-system-prompt-file') + 1]), false);
+});
+
+test('scrubEnv is an allow list: unknown variables never reach an agent', () => {
+  const env = { PATH: '/bin', HOME: '/h', GITLAB_TOKEN: 'g', OPENAI_API_KEY: 'o', DATABASE_URL: 'postgres://x', STRIPE_KEY: 's',
+    LC_ALL: 'C', ANTHROPIC_API_KEY: 'a', CLAUDE_CONFIG_DIR: '/c', HTTPS_PROXY: 'http://p', NODE_OPTIONS: '--require x', GIT_DIR: '/evil', CLAUDECODE: '1' };
+  assert.deepEqual(scrubEnv(env, []), { PATH: '/bin', HOME: '/h', LC_ALL: 'C', ANTHROPIC_API_KEY: 'a', CLAUDE_CONFIG_DIR: '/c', HTTPS_PROXY: 'http://p' });
+});
+
+test('the owner can allow extra variables by name, and only plain names count', async () => {
+  const { extraEnvAllow } = await import('../server/runner.js');
+  assert.deepEqual(extraEnvAllow('AWS_REGION, CLAUDE_CODE_USE_BEDROCK ,bad name,$(x)'), ['AWS_REGION', 'CLAUDE_CODE_USE_BEDROCK']);
+  assert.deepEqual(scrubEnv({ AWS_REGION: 'eu', AWS_SECRET_ACCESS_KEY: 's' }, ['AWS_REGION']), { AWS_REGION: 'eu' });
+});
+
+test('agents run git with fsmonitor, hooks, ssh and network transports switched off', async () => {
+  const { agentEnv } = await import('../server/runner.js');
+  const env = agentEnv({ PATH: '/bin', GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_0: 'core.pager' });
+  const pairs = Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, i) => `${env[`GIT_CONFIG_KEY_${i}`]}=${env[`GIT_CONFIG_VALUE_${i}`]}`);
+  assert.deepEqual(pairs, ['core.fsmonitor=false', 'core.hooksPath=/dev/null', 'core.sshCommand=/bin/false', 'protocol.allow=never']);
+  assert.equal(env.FLOORHANDS_AGENT, '1');
+  assert.equal(env.GIT_TERMINAL_PROMPT, '0');
+});
+
+test('model, effort, fallback and budget are passed through to the CLI', async () => {
+  const spawnFn = fakeSpawn({ lines: [ok('x')] });
+  await runAgent(base({ spawnFn, model: 'opus', effort: 'high', fallback: 'sonnet', budgetUsd: 5 }));
+  const a = spawnFn.calls[0].args;
+  const val = f => a[a.indexOf(f) + 1];
+  assert.deepEqual([val('--model'), val('--effort'), val('--fallback-model'), val('--max-budget-usd')], ['opus', 'high', 'sonnet', '5']);
+});
+
+test('the run report records the model that actually ran, cost, tokens and permission refusals', async () => {
+  const spawnFn = fakeSpawn({ lines: [
+    J({ type: 'system', subtype: 'init', model: 'claude-opus-5-5', claude_code_version: '2.1.310' }),
+    J({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'Permission to use Bash has been denied' }] } }),
+    J({ type: 'result', subtype: 'success', is_error: false, result: 'r', total_cost_usd: 0.42, duration_ms: 9000, num_turns: 4,
+      usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 300, cache_creation_input_tokens: 40 },
+      modelUsage: { 'claude-opus-5-5': {}, 'claude-sonnet-5-5': {} }, permission_denials: [{}, {}] }),
+  ] });
+  const { metrics } = await runAgent(base({ spawnFn }));
+  assert.deepEqual(metrics, {
+    model: 'claude-opus-5-5', modelsUsed: ['claude-opus-5-5', 'claude-sonnet-5-5'], cliVersion: '2.1.310', costUsd: 0.42, durationMs: 9000,
+    turns: 4, inputTokens: 10, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 40, denials: 2, subtype: 'success',
+  });
+});
+
+test('refusals are counted from tool results when the CLI does not report them', async () => {
+  const spawnFn = fakeSpawn({ lines: [
+    J({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'Permission to use Bash has been denied' }] } }),
+    J({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'file not found' }] } }),
+    ok('r'),
+  ] });
+  assert.equal((await runAgent(base({ spawnFn }))).metrics.denials, 1);
+});
+
+test('a run stopped by its spending cap fails with a clear message and still reports its cost', async () => {
+  const spawnFn = fakeSpawn({ lines: [J({ type: 'result', subtype: 'error_max_budget_usd', is_error: true, result: '', total_cost_usd: 2.01 })] });
+  const err = await runAgent(base({ spawnFn, budgetUsd: 2 })).catch(e => e);
+  assert.match(err.message, /spending cap of \$2/);
+  assert.equal(err.metrics.costUsd, 2.01);
+});
+
+test('review #3: a run whose model output did not go through the spending guard is stopped at once', async () => {
+  const spawnFn = fakeSpawn({ lines: [J({ type: 'system', subtype: 'init' }), J({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } }), ok('x')] });
+  const meter = { url: 'http://127.0.0.1:1/r/x', started: 0, on: () => () => {}, report: () => ({}) };
+  const err = await runAgent(base({ spawnFn, meter })).catch(e => e);
+  assert.match(err.message, /did not go through the spending guard/);
+  assert.equal(err.metrics.meterBypassed, true);
+  assert.ok(spawnFn.calls[0].child.signals.includes('SIGKILL'));
+  const fine = { ...meter, started: 1 };
+  assert.equal((await runAgent(base({ spawnFn: fakeSpawn({ lines: [J({ type: 'assistant', message: { content: [] } }), ok('y')] }), meter: fine }))).text, 'y');
+});
+
+test('review #3: Bedrock, Vertex and Foundry are recognised (the guard cannot see their traffic)', async () => {
+  const { usesThirdPartyProvider } = await import('../server/runner.js');
+  assert.equal(usesThirdPartyProvider({}), false);
+  assert.equal(usesThirdPartyProvider({ CLAUDE_CODE_USE_BEDROCK: '1' }), true);
+  assert.equal(usesThirdPartyProvider({ CLAUDE_CODE_USE_VERTEX: 'true' }), true);
+  assert.equal(usesThirdPartyProvider({ CLAUDE_CODE_USE_FOUNDRY: '0' }), false);
+});
+
+test('with the guard on, the CLI cap is left off; without it, the CLI cap is used', async () => {
+  const s1 = fakeSpawn({ lines: [ok('x')] });
+  await runAgent(base({ spawnFn: s1, budgetUsd: 2, meter: { url: 'http://127.0.0.1:1/r/x', started: 1, on: () => () => {}, report: () => ({}) } }));
+  assert.ok(!s1.calls[0].args.includes('--max-budget-usd'));
+  assert.equal(s1.calls[0].opts.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:1/r/x');
+  const s2 = fakeSpawn({ lines: [ok('x')] });
+  await runAgent(base({ spawnFn: s2, budgetUsd: 2 }));
+  assert.ok(s2.calls[0].args.includes('--max-budget-usd'));
+});
+
+test('N3: the CLI\'s synthetic error messages and an owner\'s stop do not trip the bypass tripwire', async () => {
+  const meter = { url: 'http://127.0.0.1:1/r/x', started: 0, stopped: false, on: () => () => {}, report: () => ({}) };
+  const synthetic = J({ type: 'assistant', message: { model: '<synthetic>', content: [{ type: 'text', text: 'API Error: 400 stopped' }] } });
+  const r1 = await runAgent(base({ spawnFn: fakeSpawn({ lines: [synthetic, ok('x')] }), meter })).catch(e => e);
+  assert.doesNotMatch(String(r1?.message ?? ''), /spending guard/);
+  const stopped = { ...meter, stopped: true };
+  const r2 = await runAgent(base({ spawnFn: fakeSpawn({ lines: [J({ type: 'assistant', message: { model: 'claude-haiku-5-5', content: [] } }), ok('y')] }), meter: stopped })).catch(e => e);
+  assert.doesNotMatch(String(r2?.message ?? ''), /spending guard/);
+});
+
+test('N4: the environment the CLI sees includes the env of the owner\'s user settings', async () => {
+  const { ownerClaudeEnv, usesThirdPartyProvider } = await import('../server/runner.js');
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fh-cfg-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: 1, ANTHROPIC_BASE_URL: 'https://gw.example/anthropic' } }));
+    const env = ownerClaudeEnv({ CLAUDE_CONFIG_DIR: dir, PATH: '/bin' }, { platform: 'linux' });
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://gw.example/anthropic');
+    assert.equal(env.CLAUDE_CODE_USE_BEDROCK, '1');
+    assert.equal(usesThirdPartyProvider(env), true);
+    assert.equal(ownerClaudeEnv({ CLAUDE_CONFIG_DIR: path.join(dir, 'none') }).CLAUDE_CODE_USE_BEDROCK, undefined);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

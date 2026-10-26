@@ -135,7 +135,8 @@ test('"No such tool available" counts as denied only when the probe expects the 
 });
 
 test('isSandboxError recognises OS sandbox errors in script output only', () => {
-  for (const t of ['WRITE-OUTSIDE-BLOCKED EPERM', 'NET-BLOCKED fetch ENOTFOUND', 'touch: x: Operation not permitted', 'getaddrinfo EAI_AGAIN']) {
+  for (const t of ['WRITE-OUTSIDE-BLOCKED EPERM', 'NET-BLOCKED fetch ENOTFOUND', 'touch: x: Operation not permitted', 'getaddrinfo EAI_AGAIN',
+    'ESCAPE-WRITE-BLOCKED EROFS', 'touch: cannot touch x: Read-only file system']) { // EROFS: how the Linux sandbox blocks a write
     assert.equal(isSandboxError(t), true, t);
   }
   for (const t of ['', null, 'LINT-OK', 'permission to use Bash has been denied', 'eperm-like text EPERMISSION']) {

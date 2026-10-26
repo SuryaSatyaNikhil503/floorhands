@@ -4,6 +4,52 @@ All notable changes to floorhands are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
+The right model for each step, spending caps, a record of what every run cost, and a stricter safety model. The permission model changed (`server/tiers.js`), and the full set of probes has not been re-run on it yet; see the README's What has been verified.
+
+### Added
+
+- Model routing (`server/models.js`). Each step has a class (`light`, `standard`, `frontier`) mapped to a model, effort level and spending cap (Haiku, Sonnet, Opus with a Sonnet fallback by default). The Architect proposes a class per step, and floorhands clamps it to the agent's range in `agents/roster.json`: the Architect and reviewers are pinned to `frontier`, builders range from `light` to `frontier` (default `standard`), the tester and support engineer from `light` to `standard` (default `light`).
+- Spending caps: `--max-budget-usd` per step, a per-task cap ($15 by default) checked before every step, and a limit on tasks running at once (1 by default). All set in `~/.floorhands/models.json`, validated strictly; `floorhands models` shows them.
+- A record of every run: the model that actually ran, the CLI version, tokens (including cache reads and writes), cost, time, turns, permission refusals and a hash of the system prompt, per step and as task totals by model. The raw plan and any plan problems are kept.
+- Reject reasons from a closed list, with an optional note. The merge commit is recorded on Approve. The diff of every rejected or failed task is kept as a redacted, owner-only patch (the newest 50).
+- Risk flags in the approval view for changes to `package.json`, lockfiles, git hooks, `.gitattributes`, CI, package manager and build config, and agent config.
+- The page shows the model, class and cost of each step, the task's usage, the risk flags and a reason picker for Reject.
+- `floorhands url` and `floorhands models`.
+- The undo-the-fix benchmark harness (`scripts/bench.mjs`, `scripts/bench-lib.mjs`, `eval/bench/`): real fix commits graded by the projects' own tests, a single-agent baseline, five runs per cell, bootstrap confidence intervals over instances, a blind judge from another model family with Cohen's kappa calibration, and approval rate. No corpus is included yet.
+- The spending guard (`server/meter.js`): a local metering proxy every agent's model requests go through. Each request is priced at its worst case before it is sent; it goes through, goes through with a lower `max_tokens`, or waits while the page asks the owner to allow more money or stop. Caps can no longer be overshot. The same question is asked before a step when the task has used its cap. `POST /api/tasks/:id/budget`, the task status `needs_budget`, and `budgetDecisions` in the task record. `FLOORHANDS_METER=off` and `FLOORHANDS_METER_LOG=1`.
+- Slim agent sessions: owner hooks off, auto memory off, owner skills off unless a roster hint applies, and per-folder details out of the system prompt (`--exclude-dynamic-system-prompt-sections`). Found by capturing the CLI's requests with a fake API: the skill listing (about 7k tokens), plugin SessionStart output (up to 10k) and a working-directory path in the system prompt (no cache sharing across worktrees). A real docs task went from $0.246 to $0.072.
+- Permission probes without an API key: `scripts/spike-claude.mjs --fake-model` runs the real CLI against a local fake Anthropic API (`scripts/fake-anthropic.mjs`) and a scripted worst-case model (`scripts/probe-model.mjs`). 67 PASS and 2 KNOWN LIMIT on 2.1.310 (`docs/spike-results-0.3.0.md`). The CLAUDE.md prompt-injection probe passes for the first time.
+- A probe workflow (`.github/workflows/probes.yml`) that runs the permission probes on macOS and Linux for every new Claude Code version and on permission-model changes, with no API key or other secret, and fails on any regression against the committed baseline (`scripts/probe-compare.mjs`). Two new probes: a repository `diff.external` program and a repository fsmonitor program under the read tier.
+
+### Changed
+
+- The read tier now runs its Bash in the sandbox too. Reviews need the sandbox (on Linux, `bubblewrap` and `socat`).
+- Agents get an allow list of environment variables instead of the owner's environment minus a deny list. `FLOORHANDS_ENV_ALLOW` adds names.
+- The system prompt reaches the CLI through `--append-system-prompt-file`, as an owner-only file deleted after the run, never on the command line.
+- `floorhands start` says to open the page with `floorhands open`, because the page needs the run's token.
+
+### Fixed after review
+
+An independent review of the pull request disproved two of its claims, with reproductions. Fixed before merge:
+- The merge on Approve ran the owner's own hooks, which can load repository files an agent changed (a commitlint config, for example) and so run agent-written code outside the sandbox. Approve now runs no hooks at all.
+- Requests waiting on the same budget question could all spend the same headroom (about 3x over in the reproduction). The check and the reservation now happen in one step.
+- With Bedrock, Vertex or Foundry, model traffic bypassed the guard and nothing capped it. The CLI's cap is used for them, and a run whose output did not go through the guard is stopped at once.
+- A cut stream released its reservation twice and cost nothing; usage past the first 8 MB of a stream was lost; fast mode, images and documents were not in the worst case; dot segments in a path reached unmetered endpoints. All fixed.
+- A sandboxed script could read the server's access token in `.floorhands/server.json` by its absolute path. Reads of that folder are denied to tools and scripts. New probes: loopback is unreachable from the sandbox, and the state folder is unreadable.
+- A second review of the fixes found that build and test agents, working in a worktree, could still read the token with the Read tool: the deny pattern was relative to the working folder. It is now an absolute path, with a probe that runs from a worktree. Also from that review: a cut stream is charged its whole output allowance (thinking is billed but not streamed); the bypass tripwire ignores the CLI's synthetic errors and an owner's stop; a provider or `ANTHROPIC_BASE_URL` in the owner's Claude settings is honoured (the guard's address goes in `--settings`, which outranks them, verified with the real CLI); only the endpoints the CLI needs pass the guard; a client that left while waiting is not sent; runner settings inside `package.json` and git-ignored test setup files count as test-setup changes, and the check fails closed.
+- The tester is also skipped when `.npmrc` or a test-runner config changed; failure messages are redacted; an unanswered budget question is cancelled when its run ends; an allowance that rounds to $0 is refused; a probe that disappears from a run fails the gate.
+
+### Security
+
+- A per-run access token protects every `/api/` route except `/api/health`.
+- Agents run git with fsmonitor, hooks, ssh and network transports switched off by environment-level config.
+- Approve runs the merge with no hooks when the branch changed files under a hooks folder, so agent-written hooks never run outside the sandbox. Before this, a builder could plant a `post-merge` hook in a `.husky/` folder that ran on Approve.
+- The server's `worktree add` and diffs no longer run repository-configured hooks, fsmonitor, external diff or textconv programs.
+- A test step is skipped when a builder changed the `package.json` scripts.
+- Agent output, the raw plan, events, reject notes and kept patches are redacted before they are stored or passed on. Task files, patches and `server.json` are owner-only.
+
 ## [0.2.0] - 2026-10-17
 
 Agents now know the project they work on, and every prompt was rewritten. Still early software: the permission model (`server/tiers.js`) is unchanged from 0.1.0.

@@ -11,7 +11,7 @@
   <img src="docs/images/floor-desktop.png" alt="The floorhands office. Nine agents in three pods on the left. On the right, a task waiting for approval with each agent's output, the proposed diff, and the Approve and Reject buttons" width="900">
 </p>
 
-> **Status: early (v0.2.0).** It works end to end on macOS with Claude Code 2.1.296. The agent prompts are version 2 and were tested on three small sample projects (see [Evaluation](#evaluation)). There are no connectors yet, and the local port has no password. Please read [Known limits](#known-limits) before you point it at anything you care about.
+> **Status: early (v0.3.0).** It works end to end on macOS. Version 0.3.0 adds model routing (Opus plans and reviews, Sonnet builds, Haiku does light work), spending caps that never overshoot (a step asks you before it spends more), slimmer agent sessions that share the prompt cache, a per-run access token and a stricter safety model. All 73 permission probes pass on Claude Code 2.1.310 on macOS and Linux, and they now run without an API key (see [What has been verified](#what-has-been-verified)). The agent prompts were tested on three small sample projects only. Please read [Known limits](#known-limits) before you point it at anything you care about.
 
 ## What it is
 
@@ -26,7 +26,9 @@ You type a task. An Architect agent turns it into a plan of up to six steps and 
 - Agents that know your project. floorhands detects the stack (languages, frameworks, which scripts exist) and tells every agent. You can add standing guidance of your own with `floorhands notes`. See [Teach it about your project](#teach-it-about-your-project).
 - Three permission tiers (read, build and test), all defined in one file, [`server/tiers.js`](server/tiers.js), and checked against the real Claude Code CLI.
 - A git worktree for every task. Approve runs `git merge --no-ff`. Reject deletes the worktree and the branch.
-- Build and test commands that run inside the Claude Code Bash sandbox, with no network and no writes outside the worktree.
+- Shell commands from every agent run inside the Claude Code Bash sandbox, with no network and no writes outside the working folder.
+- The right model for each step. The Architect and the reviewers run on Opus. Builders run on Sonnet by default, on Haiku for light work such as docs, and on Opus for hard work such as security fixes. The tester and the support engineer run on Haiku. Every step has a spending cap, every task has one too, and only one task runs at a time unless you allow more. See [Models and spending](#models-and-spending).
+- A record of every run: the model that actually ran, tokens, cache use, cost and time, shown next to each step in the page.
 - A command line tool (`floorhands start`, `status`, `stop` and more) and a Claude Code plugin. The plugin has a skill, and an optional hook that starts the office when a Claude Code session opens in your project.
 - No runtime dependencies. You only need Node 22 or newer and git.
 
@@ -332,6 +334,55 @@ This comes from [`agents/roster.json`](agents/roster.json). Each agent has a pro
 
 The roster is just data. You can rename agents, change prompts or skills, or move agents between pods without touching code (see [Configuration](#configuration)). Every agent must use one of these three tiers.
 
+### Models and spending
+
+Each step gets a **class**, and each class has a model, an effort level and a spending cap.
+
+| Class | Model (default) | Effort | Cap per step | Used for |
+|---|---|---|---|---|
+| `light` | Haiku | low | $0.50 | Docs, comments, renames, running the tests and reporting |
+| `standard` | Sonnet | medium | $2 | A change the plan already specifies well |
+| `frontier` | Opus, falling back to Sonnet when Opus is unavailable | high | $5 | Planning, reviews, security, concurrency, data integrity, design choices |
+
+The Architect proposes a class for every step. A plan is model output that text in your repository can influence, so floorhands **clamps** the proposal to the agent's own range in [`agents/roster.json`](agents/roster.json):
+
+| Agent | Range | Default |
+|---|---|---|
+| Architect, FE, BE and AWS reviewers | `frontier` only | `frontier` |
+| Front-end, back-end and SRE builders | `light` to `frontier` | `standard` |
+| E2E tester, support engineer | `light` to `standard` | `light` |
+
+So a plan can move a docs edit down to Haiku or a security fix up to Opus, but it can never move a review below Opus. The step shows both the class it ran on and, when the plan asked for something else, what it asked for.
+
+**Caps never overshoot. You are asked first.** Every model request an agent makes goes through a small local proxy, the spending guard ([`server/meter.js`](server/meter.js)). Before a request is sent, the guard prices it at its worst case: every input token as the dearest kind of input, and every output token the request allows. If that fits what is left of the step's cap, the request goes through. If only a shorter answer fits, the guard lowers `max_tokens` so the turn cannot cost more than what is left. If not even a useful answer fits, the request waits and the page asks you: **Allow $X more** or **Stop here**. Nothing more is spent until you answer, and after 30 minutes without an answer the step stops. The same question comes up before a step if the whole task has used its cap ($15 by default). After each request the guard adds its real cost, from the usage the API reports. In a real run the guard's figure matched the CLI's own to the fourth decimal. On a Claude subscription the cost is an estimate of usage, not a bill. The guard forwards your own login with each request to one fixed address and never keeps it. `FLOORHANDS_METER=off` turns it off, and then the CLI's own cap applies, which can go over by one turn.
+
+**One task at a time.** By default only one task runs at once and the others wait as *queued*. That keeps parallel tasks from using up a session limit quickly.
+
+**Slim, cache-friendly agent sessions.** The exact requests the CLI sends were captured with a local fake API and compared byte for byte. That showed where the tokens went in 0.3.0's first version. About 7,000 tokens per run listed every skill of every plugin you have installed. Your plugins' SessionStart hooks added up to 10,000 more. And the auto-memory section named a folder derived from the working directory, so every worktree had a different system prompt and almost nothing could be read from the prompt cache. Agents now run with your skills off (unless a roster hint applies to this project), your hooks off, auto memory off, and the per-folder details moved out of the system prompt. Measured with your real login on 2.1.310, a second agent in another folder with another role now reads its shared prefix from the cache:
+
+| Same docs task, real runs | Before | After |
+|---|---|---|
+| Architect (Opus) | $0.238 | $0.069 |
+| Builder (Haiku) | $0.008 | $0.0026 |
+| Whole task | $0.246 | $0.072 (71% less) |
+
+Model choice still matters most. A run on Opus costs about 25 times one on Haiku.
+
+**Change the defaults** in `~/.floorhands/models.json` (or `$FLOORHANDS_HOME/models.json`). Only the keys you set change. `floorhands models` shows what is in effect.
+
+```json
+{
+  "classes": {
+    "standard": { "model": "claude-sonnet-5-5", "budgetUsd": 3 },
+    "light": { "model": "haiku", "effort": null }
+  },
+  "taskBudgetUsd": 10,
+  "maxConcurrentTasks": 2
+}
+```
+
+A model is an alias (`opus`, `sonnet`, `haiku`) or a full model id. Aliases follow the newest model of that family, and the model that actually ran is recorded with every step, so results stay comparable. An unknown key or an invalid value stops the server from starting, and the reason is written to `.floorhands/server.log`. floorhands never quietly falls back to the defaults, because they may cost more than your settings. The repository cannot change any of this.
+
 ### How the agents are briefed
 
 Each agent's system prompt is put together fresh for every task, in this order:
@@ -343,7 +394,7 @@ Each agent's system prompt is put together fresh for every task, in this order:
 5. **Skill hints** that apply to this stack (see below).
 6. The **role body** from the agent's own prompt file. For the Architect that means routing rules and the plan format. For reviewers it is checklists and search recipes for their stacks. For builders it is a workflow and verification rules. The support engineer gets a ticket template and the tester gets a testing strategy.
 
-The whole prompt is capped at 24 KB. A prompt over the cap is refused with an error.
+The whole prompt is capped at 24 KB. A prompt over the cap is refused with an error. It reaches the CLI as a file that only you can read, which is deleted after the run. It is never on the command line, so other users of the machine cannot see your notes in the process list.
 
 **Skills are hints, never requirements.** A roster entry can be a plain skill name, or an object with `name`, `alt` and `when`. The `when` field lists fact labels, and the hint is shown only if the project has one of them. For example, a React skill is shown only for a React project. If a skill is missing or fails, the agent carries on with the checklist in its own prompt.
 
@@ -359,15 +410,21 @@ Each agent is a separate `claude -p` process. It starts with `--permission-mode 
 |---|---|
 | **Tiers** | Read agents can only read files and run read-only git. Builders can edit only under their working directory with `Edit(./**)`. A plain Edit or Write allow was found to let the CLI write outside the worktree, so it was replaced. The tester can run test scripts but cannot edit. |
 | **Deny rules** (every tier) | These stay denied even if your own settings allow them, because deny beats allow. They cover `git push`, `pull`, `fetch`, `commit`, `merge`, `rebase`, `checkout`, `reset`, `branch`, `config`, `-C`, `-c` and most other git commands that change state. They also cover `--output`, `--no-index`, `--ext-diff` and `--textconv` anywhere in a git command (`--output` and `--no-index` were tested). Also denied are `rm`, `mv`, `cp`, `chmod`, `ln`, `sudo`, `ssh`, `curl`, `wget`, `nc`, `open`, `aws`, `kubectl`, `docker`, `terraform apply` and `destroy`, `cdk deploy` and `destroy`, `npm install`, `ci` and `publish`, `npx`, `node`, `sh`, `bash`, `python`, `eval`, `xargs` and `env`. Every shell command that can print or search a file is denied too (`cat`, `head`, `sort`, `awk`, `sed`, `base64`, `diff`, `grep`, `rg`, `git grep`, `git cat-file` and others). Agents use the Read, Grep and Glob tools instead, which respect the file deny rules. |
-| **Secret files** | The Read tool is denied `.env*`, `*.pem` and the home credential stores `~/.aws`, `~/.ssh`, `~/.config/gh`, `~/.config/gcloud`, `~/.npmrc`, `~/.netrc`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`, `~/.gnupg`, `~/.azure`, `~/.pypirc`, `~/.gem/credentials`, `~/.cargo/credentials*`, `~/.password-store`, `~/.claude` and `~/Library/Keychains`. Edit and Write are denied for `.env*`, `.git` (including the worktree's `.git` link file), `node_modules`, `.claude`, `.mcp.json`, `~/.ssh`, `~/.aws`, `~/.claude` and your shell rc files. |
+| **Secret files** | The Read and Edit tools, and sandboxed scripts, are denied the project's `.floorhands` folder by its absolute path, from every working folder (it holds the run's access token). The Read tool is denied `.env*`, `*.pem` and the home credential stores `~/.aws`, `~/.ssh`, `~/.config/gh`, `~/.config/gcloud`, `~/.npmrc`, `~/.netrc`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`, `~/.gnupg`, `~/.azure`, `~/.pypirc`, `~/.gem/credentials`, `~/.cargo/credentials*`, `~/.password-store`, `~/.claude` and `~/Library/Keychains`. Edit and Write are denied for `.env*`, `.git` (including the worktree's `.git` link file), `node_modules`, `.claude`, `.mcp.json`, `~/.ssh`, `~/.aws`, `~/.claude` and your shell rc files. |
 | **Worktree isolation** | Build and test steps work in `~/.floorhands/worktrees/<project-hash>/<task-id>` on the branch `floorhands/<task-id>`, never in your working copy. Your branch changes only when you press Approve. |
 | **`.git` link tamper check** | A worktree's `.git` is a small file that points to the real repository. Before every commit, floorhands checks that the worktree's HEAD is still its own `floorhands/<task-id>` branch and that its git directory is that worktree's own entry in your repository. If not, it refuses to commit. These git commands run with hooks, fsmonitor and `core.sshCommand` switched off and with `--no-verify`, so nothing planted in the worktree runs inside the server. Approve and Reject act only on a worktree inside the floorhands folder and on a `floorhands/` branch. |
-| **Bash sandbox** (build and test) | Shell commands run in Claude Code's OS-level sandbox. No network host is reachable and nothing can be written outside the worktree. Sandboxed commands still need an allow rule, there is no unsandboxed retry, and the run refuses to start if the sandbox is not available. Scripts are also denied the home credential stores listed above, all except `~/.cargo/credentials*`. |
+| **Bash sandbox** (every tier) | Shell commands run in Claude Code's OS-level sandbox. No network host is reachable and nothing can be written outside the working folder. Sandboxed commands still need an allow rule, there is no unsandboxed retry, and the run refuses to start if the sandbox is not available. Scripts are also denied the home credential stores listed above, all except `~/.cargo/credentials*`. Since 0.3.0 the read tier is sandboxed too, so a diff or textconv program set in the repository's git config is contained when a reviewer runs `git diff`. |
+| **Git config overrides** | Every agent runs git with fsmonitor, hooks, ssh and all network transports switched off through environment-level config, which beats the repository's `.git/config`. The server's own git calls inside worktrees, `worktree add`, and its diffs (`--no-ext-diff --no-textconv`) are hardened the same way. |
+| **Approve runs no hooks** | The merge on Approve runs with all git hooks off, yours included. Hooks run after the merged files are in place, and ordinary hooks load repository files an agent may have changed (a commitlint config, `lefthook.yml`, `.pre-commit-config.yaml`, `package.json` scripts through `npm install`). That would run agent-written code outside every sandbox. Run your hooks yourself after reviewing the merge if you need them. |
+| **Changed test setup is never run** | If a builder changed how the tests run (the `scripts` in `package.json`, `.npmrc` and similar, or a test-runner config such as `vitest.config.ts`), the tester's step is skipped and the page says why. Test files a builder wrote still run, inside the sandbox. The sandbox, not this check, is what contains agent-written code. |
+| **Risk flags** | Before you approve, the page lists changes that decide what runs on your machine later: `package.json`, lockfiles, git hooks, `.gitattributes`, CI files, package manager and build config, and agent config such as `CLAUDE.md` or `.mcp.json`. |
 | **`--setting-sources user`** | Agents load only your user-level Claude settings. The target repository's `.claude/settings.json`, `.claude/settings.local.json`, hooks and skills are ignored. This closed a real bypass found while testing, where a hook in an untrusted repository's settings ran outside the sandbox, as you. |
 | **`--strict-mcp-config`** | Agents get no MCP servers. That means none of your connectors (mail, drive and the like) and nothing from the repository's `.mcp.json`. |
-| **Credential scrubbing** | Agent processes do not inherit `AWS_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, or any variable whose name contains `SECRET`, `PASSWORD`, `PASSWD` or `PRIVATE_KEY`. This is a deny list (see Known limits). |
+| **Environment allow list** | Agents get only the variables they need: `PATH`, `HOME`, user and locale settings, proxies and CA bundles, and `ANTHROPIC_*` and `CLAUDE_*` so the CLI can log in. Everything else, such as `GITLAB_TOKEN`, `OPENAI_API_KEY` or `DATABASE_URL`, never reaches an agent. Add names with `FLOORHANDS_ENV_ALLOW=NAME,NAME`, for example for Bedrock or Vertex. |
+| **Redaction** | Agent output, the raw plan, events, reject notes and kept patches are redacted before they are stored or handed to the next agent. That covers private keys, cloud and API tokens, JWTs, passwords in URLs and quoted secret values. It is a pattern list, so it is a safety net, not a guarantee. Task files and patches are readable by you only. |
+| **Access token** | The server makes a new random token at every start. Every `/api/` route except `/api/health` needs it. `floorhands open` passes it in the part of the link after `#`, which browsers never send to a server, and the page then keeps it for that tab only. |
 | **Facts and notes** | Project facts hold only labels from a fixed list plus numbers, so repository text cannot reach an agent's prompt through them. Facts and notes are framed as data or guidance and never as a way to change a tier. Owner notes live outside the repository, so a repository cannot plant instructions in them. |
-| **Local server guards** | The server listens on 127.0.0.1 only. It rejects requests whose `Host` is not `localhost`, `127.0.0.1` or `[::1]`, which protects against DNS rebinding. It rejects POSTs from another `Origin`, and POSTs that are not `application/json`, so a plain form on another website cannot submit a task. Request bodies are capped at 64 KB. The page is served with a strict Content-Security-Policy and loads nothing from other origins. |
+| **Local server guards** | The access token above, and the server listens on 127.0.0.1 only. It rejects requests whose `Host` is not `localhost`, `127.0.0.1` or `[::1]`, which protects against DNS rebinding. It rejects POSTs from another `Origin`, and POSTs that are not `application/json`, so a plain form on another website cannot submit a task. Request bodies are capped at 64 KB. The page is served with a strict Content-Security-Policy and loads nothing from other origins. |
 
 ### What has been verified
 
@@ -378,7 +435,11 @@ The permission model was tested against the **real CLI, Claude Code 2.1.296 on m
 
 The full evidence is in [docs/spike-findings.md](docs/spike-findings.md) and the JSON results next to it.
 
-`server/tiers.js` has not changed since 0.1.0, so these results still describe the permission model. The 0.2.0 code (stack detection, notes and prompt assembly) is covered by the test suite, which uses a fake `claude` (`npm test`). How the version 2 prompts behave with the real CLI is the subject of the next section.
+**All 73 probes, run on Claude Code 2.1.310 with no API key: 71 PASS, 2 KNOWN LIMIT, 0 FAIL, 0 INCONCLUSIVE on macOS, and the same on Linux in CI** (apart from two probes that check your own installed skills, which a CI machine does not have) ([docs/spike-results-0.3.0.md](docs/spike-results-0.3.0.md)). The probes test the CLI's permission layer, not the model. So `--fake-model` runs the real `claude` CLI, with its permission checks, sandbox, hooks and settings loading, against a local fake Anthropic API ([`scripts/fake-anthropic.mjs`](scripts/fake-anthropic.mjs)). Its scripted worst-case model ([`scripts/probe-model.mjs`](scripts/probe-model.mjs)) makes exactly the tool call each probe asks for, and it also obeys instructions planted in files it reads. A real model sometimes declines to try, which left probes INCONCLUSIVE. The scripted one never declines, so the CLAUDE.md prompt-injection probe now passes for the first time: the injected command was attempted and refused. The two KNOWN LIMIT results are limit 3 below, reproduced on purpose. A run takes about 20 seconds and costs nothing, so CI runs it on every change to the permission model and for every new Claude Code version.
+
+**0.3.0 changes, checked against the real CLI (Claude Code 2.1.310 on macOS, on 2026-10-25).** Through the production runner: the system prompt reaches the CLI as a file (the agent answered with a code word that only the file contained), the `haiku` and `opus` aliases ran as `claude-haiku-5-5` and `claude-opus-5-5`, `--effort` and `--fallback-model` were accepted, a plan's `light` class for the Architect was clamped to `frontier`, `git status` works in the now sandboxed read tier, a repository fsmonitor program did not run, `--max-budget-usd` stopped a run with `error_max_budget_usd` (after one turn more than the cap), and the cost and token figures were parsed. The spending guard was checked with your real login: a $0.02 cap made the Opus Architect ask before its first request, it went on after $1 was allowed, and neither step went over its final budget. Two new probes cover the read tier: a repository `diff.external` program (it ran, and the sandbox contained it) and a repository fsmonitor program (it did not run). The probe workflow ([`.github/workflows/probes.yml`](.github/workflows/probes.yml)) runs on macOS and Linux without any secret.
+
+Before 0.3.0, `server/tiers.js` had not changed since 0.1.0. The 0.2.0 code (stack detection, notes and prompt assembly) is covered by the test suite, which uses a fake `claude` (`npm test`). How the version 2 prompts behave with the real CLI is the subject of the next section.
 
 ### Evaluation
 
@@ -400,30 +461,32 @@ Keep these limits in mind. There were two runs per cell, three projects and 24 p
 
 ### Known limits
 
-1. **Project scripts are trusted code.** `npm run` and `npm test` run the scripts in your `package.json`. A builder can edit `package.json` in its worktree and so change what those scripts do before you approve. They run sandboxed, but the sandbox protects your working copy and the network, not everything. Scripts can still read most of your machine, apart from the denied credential stores, and they run with your environment minus the scrubbed variables.
-2. **No authentication on the local port.** Beyond binding to 127.0.0.1 and the Host and Origin checks, anything that can reach the port on your machine, such as another local user or process, can start agents. A per-run token is planned.
-3. **Committed secrets are readable.** A secret that the repository has **committed** stays readable through the allowed git reads. `git show HEAD:.env` printed one in testing. Sandboxed build and test scripts can also read the worktree's own `.env*`, although a fresh worktree has one only if it is committed. Do not put secrets in task text either, because it is stored in `.floorhands/`.
-4. **Git programs set in the repository.** Read-tier `git diff`, `git log` and `git show` can run diff or textconv programs configured in the repository's git config, and the read tier is not sandboxed. Treat the read tier as safe for trusted repositories only.
-5. **`.gitattributes` filters.** A `.gitattributes` file in the worktree can send files through filter programs that **you** configured, such as git-lfs, when floorhands commits or when you approve. Agents cannot add a filter program. Switching off yours would break repositories that use git-lfs or git-crypt, so this is accepted.
-6. **Your own Claude settings still apply.** Agents load your `~/.claude/settings.json`. A broad allow there widens what agents may run, although deny rules still win. The hooks of your plugins run in every agent session, outside the sandbox.
-7. **Environment scrubbing is a deny list.** Other secret-looking variables, such as `GITLAB_TOKEN`, `OPENAI_API_KEY` and `DATABASE_URL`, still reach agents.
+1. **Project scripts are trusted code.** `npm run` and `npm test` run the scripts in your `package.json`. A builder can still change a script and run it in the same step through `npm run build`, inside the sandbox. The tester's step is skipped when the test setup changed, but test files a builder wrote do run, inside the sandbox. The sandbox protects your working copy and the network, not everything. Scripts can still read most of your machine apart from the denied credential stores.
+2. **The spending guard sees only what goes through it.** It meters the requests the CLI sends to `ANTHROPIC_BASE_URL`. If an agent produces model output while the guard has seen no request, the run is stopped at once and marked `meterBypassed`. With Bedrock, Vertex or Foundry configured the CLI talks to them directly, so the guard is skipped and the CLI's own cap applies, which can go over by one turn (the same as `FLOORHANDS_METER=off`). The worst case uses a built-in price list (`server/models.js`, fast mode at twice the rate) and an unknown model is priced as the dearest known one. Images and documents are counted with the API's free token counter when it answers, otherwise with a generous fixed bound each. A stream that is cut before its final usage arrives is charged its whole output allowance, because the output already produced (thinking included) is billed but unknown. That errs high. A provider or `ANTHROPIC_BASE_URL` set in your Claude settings is honoured: the guard forwards to that address, and Bedrock, Vertex or Foundry turn the guard off as above. Only the endpoints the CLI needs pass the guard. Two cases it cannot handle: an `ANTHROPIC_BASE_URL` in managed settings (set by an organisation) outranks the guard's address, so the tripwire stops each step after one turn, and a plain `http://` base URL anywhere other than this machine is refused when the server starts.
+3. **Committed secrets are readable.** A secret that the repository has **committed** stays readable through the allowed git reads. `git show HEAD:.env` printed one in testing, and a sandboxed script can read the worktree's own `.env`, which exists in a fresh worktree only if it was committed. Redaction keeps the common token shapes out of stored output and out of later agents' prompts, but it is a pattern list. Do not put secrets in task text either.
+4. **Git programs set in the repository.** A `diff.external` or textconv program from the repository's git config still runs when a reviewer runs `git diff`, `git log` or `git show`. Since 0.3.0 it runs inside the sandbox, so it cannot reach the network or write outside the working folder, but it can read most of your machine. Only run floorhands on repositories you cloned yourself.
+5. **`.gitattributes` filters.** A `.gitattributes` file in the worktree can send files through filter programs that **you** configured, such as git-lfs, when floorhands commits or when you approve. Agents cannot add a filter program. Switching off yours would break repositories that use git-lfs or git-crypt, so this is accepted. The page flags a changed `.gitattributes`.
+6. **Your own Claude settings still apply.** Agents load your `~/.claude/settings.json`. A broad allow there widens what agents may run, although deny rules still win. Since 0.3.0 your hooks do not run in agent sessions, and your skills are offered only to an agent whose roster entry hints at one for this project.
+7. **Reviews need the sandbox.** Since 0.3.0 every tier runs in the Claude Code sandbox, and a run refuses to start without it. On Linux that needs `bubblewrap` and `socat`, which have not been tried yet.
 8. **`node_modules` is shared.** A worktree's `node_modules` is a link to your real one so that builds work. Agents cannot edit it, and the sandbox stops scripts from writing through it. Scripts that write caches into `node_modules/.cache` therefore fail.
 9. **Stopping does not stop running agents.** `floorhands stop` in the middle of a task does not kill a `claude` process that is already running. The 15-minute agent timeout kills only that process and not what it started. The next start marks the task failed and leaves its `floorhands/<task-id>` branch and worktree for you to remove (see [Troubleshooting](#troubleshooting)).
-10. **A failed task discards builder work.** If a step fails after builders committed, the worktree and branch are deleted instead of being kept for review.
+10. **A failed task removes its worktree.** The diff is kept as a redacted patch in `.floorhands/patches/` (the newest 50), but the branch is deleted.
 11. **Git commands have no timeout.** A merge that waits for input, such as a GPG passphrase prompt, or a hanging hook in your repository blocks that task's Approve until the server restarts.
-12. **No cap on concurrent tasks.** Each task you send starts at once, with its own worktree and agent processes.
-13. **The prompts are version 2, not finished.** They were tested on three small sample projects only (see [Evaluation](#evaluation)), and real repositories are bigger and messier. Treat findings as leads to check. Treat an `approve` verdict as "nothing at High or above in what was checked" and not as a clean bill of health. Skill hints depend on which plugins you have installed, and agents carry on without them.
-14. **No connectors.** Agents see only the repository. They have no GitHub, cloud account, monitoring or issue tracker yet.
-15. **A hostile `.git/config`.** Only run floorhands on repositories you cloned yourself. An archive or folder that ships its own `.git` directory can carry a git config that makes git run programs. floorhands hardens its own project scan and the commits it makes in worktrees. During the scan, git runs with every transport, lazy fetching and fsmonitor switched off, and a `.git` that is not a real directory is not trusted. But not every git call is hardened. Finding the project root, creating worktrees, the git commands of read-tier agents (limit 4) and the merge when you press Approve all use the repository's config as it is.
-16. **The system prompt is visible in the process list.** It is passed on the `claude` command line, so other users on the same machine can read your owner notes and the project facts while an agent runs, for example with `ps`. Keep secrets and anything private out of your notes.
-17. **Project facts are shallow.** Scripts are read only from the root `package.json`, and a stack outside the fixed list of labels is not named. Detection reads a limited number of files, so a very large repository may show an incomplete picture. Agents are told the facts are hints and can read the code themselves.
+12. **The prompts are version 2, not finished.** They were tested on three small sample projects only (see [Evaluation](#evaluation)). Whether Sonnet builds as well as Opus from an Opus plan is the design's bet, and it is not measured yet. The benchmark in [`eval/bench/`](eval/bench/README.md) is built to measure it. Treat findings as leads to check, and an `approve` verdict as "nothing at High or above in what was checked".
+13. **No connectors.** Agents see only the repository. They have no GitHub, cloud account, monitoring or issue tracker.
+14. **A hostile `.git/config`.** Only run floorhands on repositories you cloned yourself. Worktree creation, the server's diffs and its commits are hardened, but finding the project root and the merge on Approve still use the repository's config as it is (apart from hooks, see the Safety table).
+15. **The token is only as private as your browser tab.** Anyone who can read the link printed by `floorhands url`, or the tab's storage, can use the office until the server restarts.
+16. **Project facts are shallow.** Scripts are read only from the root `package.json`, and a stack outside the fixed list of labels is not named. Detection reads a limited number of files, so a very large repository may show an incomplete picture. Agents are told the facts are hints and can read the code themselves.
+17. **Aliases move.** `opus`, `sonnet` and `haiku` follow the newest model of each family. Each step records the exact model that ran, but two runs a month apart may use different models. Pin full model ids in `models.json` for strict comparisons.
 
 ## CLI and skill reference
 
 | Command | What it does |
 |---|---|
 | `floorhands start` | Starts the office for the current repository, or finds the one already running, and prints its address. |
-| `floorhands open` | Does the same as `start`, then opens the page in your browser. |
+| `floorhands open` | Does the same as `start`, then opens the page in your browser with this run's access token. |
+| `floorhands url` | Prints the page link with this run's access token. Keep it private. |
+| `floorhands models` | Shows the model, effort and spending cap for each class of step, the task cap, how many tasks may run at once, and where to change them. |
 | `floorhands status` | Shows whether it is running and on which port, the project root, and whether auto-start is on. |
 | `floorhands stop` | Stops this project's server. A stale record is removed. |
 | `floorhands enable` and `floorhands disable` | Turn auto-start on or off for this project. They create or remove `.floorhands/enabled`. |
@@ -438,7 +501,8 @@ Exit codes: `0` on success (including "not running"), `1` if the server could no
 
 | Skill | Runs |
 |---|---|
-| `/floorhands:floorhands start` | `floorhands start`, or `floorhands open` if you ask it to open the page |
+| `/floorhands:floorhands start` | `floorhands start`, or `floorhands open` if you ask it to open the page. The skill never prints the token link itself. |
+| `/floorhands:floorhands models` | `floorhands models` |
 | `/floorhands:floorhands status` | `floorhands status` |
 | `/floorhands:floorhands stop` | `floorhands stop` |
 | `/floorhands:floorhands on` | `floorhands enable` |
@@ -454,17 +518,21 @@ The skill runs the `floorhands` command through Claude's Bash tool, so the comma
 | `FLOORHANDS_HOME` | `~/.floorhands` | Where floorhands keeps its own files outside your repositories. That means worktrees (`<home>/worktrees/<project-hash>/<task-id>`) and owner notes (`<home>/projects/<project-hash>/notes.md`). |
 | `FLOORHANDS_CLAUDE_BIN` | `claude` | The command to run for each agent turn. `scripts/fake-claude.mjs` is a stand-in for demos and tests. |
 | `FLOORHANDS_LOCK_WAIT_MS` | `5000` | How long a starting server waits for the server holding this project's lock to answer before it treats the lock as stale. |
+| `FLOORHANDS_METER` | on | `off` turns the spending guard off. Then each step's cap is the CLI's own `--max-budget-usd`, which can go over by one turn. |
+| `FLOORHANDS_METER_LOG` | not set | `1` writes one line per model request (timing, status, the output allowance sent) to `.floorhands/server.log`. Never the content. |
+| `FLOORHANDS_ENV_ALLOW` | not set | Extra environment variable names, separated by commas, that agents may see. For example `CLAUDE_CODE_USE_BEDROCK,AWS_REGION,AWS_PROFILE` for Bedrock. Agents see only an allow list otherwise. |
 | `FLOORHANDS_BIN` | not set | For the start-up hook only. The path to `bin/floorhands` when it is neither at `~/.local/bin/floorhands` nor next to the plugin. |
 
-Set these in the environment of `floorhands start`, and the server inherits them. Agents use your default Claude Code model.
+Set these in the environment of `floorhands start`, and the server inherits them. Models, effort, spending caps and how many tasks run at once are set in `models.json`, see [Models and spending](#models-and-spending).
 
 **Where things are kept**
 
-- `<project>/.floorhands/` holds `tasks/` (one JSON file per task with the text, the plan, each step's output, the project facts the agents were given and the last 500 events), `server.json` (process id and port), `server.lock`, `server.log`, and `enabled` when auto-start is on. It is listed in `.git/info/exclude`, so it is never committed.
+- `<project>/.floorhands/` holds `tasks/` (one JSON file per task with the text, the raw plan, each step's output, model, tokens, cost and time, the project facts the agents were given, your Approve or Reject decision with its reason, the merge commit, and the last 500 events), `patches/` (the redacted diff of each rejected or failed task, the newest 50), `server.json` (process id, port and the access token, readable by you only), `server.lock`, `server.log`, and `enabled` when auto-start is on. Task files and patches are readable by you only. It is listed in `.git/info/exclude`, so it is never committed.
+- `~/.floorhands/models.json` (or under `$FLOORHANDS_HOME`) holds your model and spending settings, if you created it.
 - `~/.floorhands/worktrees/` (or `$FLOORHANDS_HOME/worktrees/`) holds one folder per project and one worktree per task.
 - `~/.floorhands/projects/<project-hash>/notes.md` (or under `$FLOORHANDS_HOME/projects/`) holds your owner notes for that project. `floorhands notes` shows the exact path.
 
-**Customising the team (locally).** Edit [`agents/roster.json`](agents/roster.json) and the prompts in [`agents/prompts/`](agents/prompts/), then restart with `floorhands stop && floorhands start`. Each agent needs an `id`, `name`, `role`, `pod`, `tier` (`read`, `build` or `test`) and `prompt` (a plain `.md` file name). Each pod needs exactly one `lead`, and exactly one agent must be the `router`, which is the planner. An invalid roster stops the server from starting, and the reason is written to `.floorhands/server.log`. The file `_common.md` is put in front of every prompt, with `{{name}}` and `{{role}}` filled in. The optional `skills` list takes names, or objects with `name`, `alt` and `when`, where `when` lists fact labels from the [fixed list](#teach-it-about-your-project). An unknown label makes the roster invalid. Permissions are not configurable per agent, because they come from the tier. Test any prompt change with `npm test`. The prompt lint fails if a prompt tells an agent to run something its tier denies.
+**Customising the team (locally).** Edit [`agents/roster.json`](agents/roster.json) and the prompts in [`agents/prompts/`](agents/prompts/), then restart with `floorhands stop && floorhands start`. Each agent needs an `id`, `name`, `role`, `pod`, `tier` (`read`, `build` or `test`) and `prompt` (a plain `.md` file name). The optional `model` is the agent's class range, `{ "default", "min", "max" }`, each one of `light`, `standard` or `frontier`. An agent without it runs on `frontier` only. Each pod needs exactly one `lead`, and exactly one agent must be the `router`, which is the planner. An invalid roster stops the server from starting, and the reason is written to `.floorhands/server.log`. The file `_common.md` is put in front of every prompt, with `{{name}}` and `{{role}}` filled in. The optional `skills` list takes names, or objects with `name`, `alt` and `when`, where `when` lists fact labels from the [fixed list](#teach-it-about-your-project). An unknown label makes the roster invalid. Permissions are not configurable per agent, because they come from the tier. Test any prompt change with `npm test`. The prompt lint fails if a prompt tells an agent to run something its tier denies.
 
 ## Troubleshooting
 
@@ -588,13 +656,13 @@ Running things is npm-only today. Builders can run only `npm run lint`, `build`,
 
 In rough order:
 
-1. Project profiles. Owner notes (free-text guidance for each project) shipped in 0.2.0. Still to do are ready-made, reusable profiles, for example for regional data-protection rules or SEO.
-2. A per-run auth token for the local server.
-3. Connectors for GitHub, AWS (read-only) and an issue tracker.
-4. Verify the sandbox and the probes on Linux.
-5. Kill the whole process group on stop and on timeout, and clean up the worktrees of interrupted tasks on restart.
-6. Environment scrubbing as an allow list instead of a deny list.
-7. Harden the remaining git calls against a hostile `.git/config`.
+1. Build the real benchmark corpus (20 to 50 verified fix commits, 10 held out) and publish the first results: floorhands against one agent, with confidence intervals and the cost per solved task.
+2. Watch the first Linux run of the probe workflow (the sandbox there needs `bubblewrap` and `socat`).
+3. Use floorhands on real work for four weeks and report the approval rate from the recorded decisions.
+4. Kill the whole process group on stop and on timeout, and clean up the worktrees of interrupted tasks on restart.
+5. Harden the last git calls (project root, the merge on Approve) against a hostile `.git/config`.
+6. Project profiles: ready-made, reusable owner notes, for example for regional data-protection rules.
+7. Connectors for GitHub, AWS (read-only) and an issue tracker, only after the benchmark shows the core is worth extending.
 
 ## Project layout
 
