@@ -57,7 +57,19 @@ export function agentEnv(env = process.env) {
 // Bedrock, Vertex and Foundry are reached by the CLI directly, not through ANTHROPIC_BASE_URL, so the spending guard cannot see that
 // traffic. With one of them configured, the orchestrator keeps the CLI's own --max-budget-usd on instead of the guard.
 const THIRD_PARTY = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'];
-export const usesThirdPartyProvider = (env = process.env) => THIRD_PARTY.some(k => /^(1|true|yes|on)$/i.test(String(env[k] ?? '').trim()));
+export const usesThirdPartyProvider = (env = ownerClaudeEnv()) => THIRD_PARTY.some(k => /^(1|true|yes|on)$/i.test(String(env[k] ?? '').trim()));
+
+// The environment the claude CLI will actually see: the process environment, overridden by the "env" of the owner's user settings
+// and of managed settings (the CLI applies both). Review finding: a provider or ANTHROPIC_BASE_URL set only in ~/.claude/settings.json
+// was invisible to floorhands.
+export function ownerClaudeEnv(env = process.env, { home = os.homedir(), platform = process.platform } = {}) {
+  const read = f => { try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); return j?.env && typeof j.env === 'object' ? j.env : {}; } catch { return {}; } };
+  const configDir = env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+  const managed = platform === 'darwin' ? '/Library/Application Support/ClaudeCode/managed-settings.json' : platform === 'win32' ? 'C:\\ProgramData\\ClaudeCode\\managed-settings.json' : '/etc/claude-code/managed-settings.json';
+  const out = { ...env, ...read(path.join(configDir, 'settings.json')), ...read(managed) };
+  for (const [k, v] of Object.entries(out)) if (typeof v !== 'string') out[k] = String(v);
+  return out;
+}
 
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -105,7 +117,7 @@ export function runAgent({ agent, system, prompt, cwd, onEvent = () => {}, spawn
     let child, sys;
     try {
       sys = writeSystemFile(system);
-      child = spawnFn(claudeBin, buildClaudeArgs({ agent, systemFile: sys.file, model, effort, fallback, budgetUsd: meter ? undefined : budgetUsd, skills, denyRead }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnFn(claudeBin, buildClaudeArgs({ agent, systemFile: sys.file, model, effort, fallback, budgetUsd: meter ? undefined : budgetUsd, skills, denyRead, baseUrl: meter?.url }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       sys?.remove();
       return reject(e);
@@ -144,7 +156,9 @@ export function runAgent({ agent, system, prompt, cwd, onEvent = () => {}, spawn
         const content = j.message?.content;
         // Tripwire: the agent produced model output, yet the spending guard never admitted a request. Its traffic is going around the
         // guard, so nothing caps it: stop at once rather than find out from the bill.
-        if (j.type === 'assistant' && meter && meter.started === 0) {
+        // The CLI also emits synthetic assistant messages (model "<synthetic>") for its own errors, including the guard refusing a
+        // request because the owner said stop: those are not model output.
+        if (j.type === 'assistant' && meter && meter.started === 0 && !meter.stopped && j.message?.model !== '<synthetic>') {
           try { child.kill('SIGKILL'); } catch { /* already gone */ }
           done(reject, Object.assign(new Error(`${agent.name} was stopped: its model requests did not go through the spending guard, so its spending was not capped`), { metrics: { meterBypassed: true } }));
           return;

@@ -253,7 +253,13 @@ export function createOrchestrator({ root, roster, store, runner, wt, emit = () 
         let redefined = [];
         if (agent.tier === 'test' && task.worktree) {
           if (wt.scriptsChanged && await wt.scriptsChanged(task.worktree)) redefined.push('package.json');
-          try { if (wt.changedFiles && wt.changesTestDefinition) redefined.push(...wt.changesTestDefinition(await wt.changedFiles(root, task.worktree))); } catch { /* no extra check */ }
+          if (wt.changedFiles && wt.changesTestDefinition) {
+            // Fail closed: if the check itself fails, do not run the tests.
+            try {
+              const files = [...await wt.changedFiles(root, task.worktree), ...(wt.ignoredFiles ? await wt.ignoredFiles(task.worktree) : [])];
+              redefined.push(...wt.changesTestDefinition(files));
+            } catch { redefined.push('(the check could not run)'); }
+          }
         }
         if (redefined.length) {
           step.status = 'skipped';

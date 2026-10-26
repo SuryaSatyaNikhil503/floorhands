@@ -24,7 +24,7 @@ const SAFETY = 1.25; // margin on the bytes-per-token ratio observed for this ru
 export const UPSTREAM_IDLE_MS = 3 * 60 * 1000;
 const DROP_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'transfer-encoding', 'keep-alive', 'proxy-connection']);
 
-export function defaultUpstream(env = process.env) {
+export function defaultUpstream(env = process.env) { // main.js passes ownerClaudeEnv(): the URL the CLI itself would use
   const raw = env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
   const u = new URL(raw);
   if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname))) {
@@ -43,7 +43,7 @@ export function estimateInputTokens(bytes, observed) {
 // latest usage is kept, so a long stream is never truncated (the output count comes in the final message_delta).
 export function usageTracker(contentType = '') {
   const usage = {};
-  let model = null, line = '', json = '', isJson = !/event-stream/i.test(contentType), decided = !!contentType;
+  let model = null, line = '', json = '', isJson = !/event-stream/i.test(contentType), decided = !!contentType, complete = false;
   const take = (u = {}) => {
     for (const k of ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens']) if (Number.isFinite(u[k])) usage[k] = u[k];
     if (Number.isFinite(u.cache_creation?.ephemeral_1h_input_tokens)) usage.cache_creation_1h = u.cache_creation.ephemeral_1h_input_tokens;
@@ -54,7 +54,7 @@ export function usageTracker(contentType = '') {
     let j;
     try { j = JSON.parse(l.slice(5)); } catch { return; }
     if (j.type === 'message_start') { take(j.message?.usage); if (j.message?.model) model = j.message.model; }
-    if (j.type === 'message_delta') take(j.usage);
+    if (j.type === 'message_delta') { take(j.usage); if (Number.isFinite(j.usage?.output_tokens)) complete = true; }
   };
   return {
     feed(chunk) {
@@ -67,9 +67,9 @@ export function usageTracker(contentType = '') {
     },
     result(fallbackModel) {
       if (isJson) {
-        try { const j = JSON.parse(json); take(j.usage); if (j.model) model = j.model; } catch { /* not JSON */ }
+        try { const j = JSON.parse(json); take(j.usage); if (j.model) model = j.model; complete = Number.isFinite(j.usage?.output_tokens); } catch { /* not JSON */ }
       } else if (line) onLine(line);
-      return { usage: { ...usage }, model: model ?? fallbackModel };
+      return { usage: { ...usage }, model: model ?? fallbackModel, complete };
     },
   };
 }
@@ -191,6 +191,10 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
       return fail(res, 400, 'floorhands meter: bad path', 'invalid_request_error');
     }
     const isMessages = req.method === 'POST' && pathPart === '/v1/messages';
+    // Only what the CLI needs gets through: the metered messages endpoint, the free token counter, and its read-only checks.
+    // Anything else (other POST endpoints, odd spellings such as /v1//messages or /V1/messages) would be unmetered spending.
+    const allowed = isMessages || (req.method === 'POST' && pathPart === '/v1/messages/count_tokens') || (['GET', 'HEAD'].includes(req.method) && (pathPart === '/api/hello' || /^\/v1\/models(\/[\w.-]+)?$/.test(pathPart)));
+    if (!allowed) return fail(res, 403, `floorhands meter: ${req.method} ${pathPart.slice(0, 60)} is not allowed through the spending guard`, 'permission_error');
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) if (!DROP_HEADERS.has(k.toLowerCase())) headers[k] = v;
     headers['accept-encoding'] = 'identity'; // the meter reads usage from the response, so it must not be compressed
@@ -213,6 +217,7 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
         return fail(res, 400, 'floorhands: the owner stopped this step at its spending cap', 'invalid_request_error');
       }
       reserve = admitted.reserve;
+      if (res.destroyed || req.socket?.destroyed) { release(); trace('client-gone-before-send'); return; }
       model = admitted.body.model;
       sentMax = admitted.body.max_tokens;
       if (admitted.body !== body) send = Buffer.from(JSON.stringify(admitted.body));
@@ -230,8 +235,11 @@ export function createMeter({ upstream = defaultUpstream(), request = (upstream.
       charged = true;
       release();
       if (!isMessages || !tracker || (status ?? 500) >= 400) return;
-      const { usage, model: ran } = tracker.result(model);
+      const { usage, model: ran, complete } = tracker.result(model);
       if (!Object.keys(usage).length) return;
+      // Cut before the final message_delta: the output already produced is billed but unknown (thinking tokens are not even
+      // streamed), so charge the whole output allowance that was sent. Errs high, never low.
+      if (!complete && Number.isInteger(sentMax)) usage.output_tokens = Math.max(usage.output_tokens ?? 0, sentMax);
       run.spentUsd += costOf(ran, usage, { fast: usage.speed === 'fast' });
       run.requests++;
       const promptTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
