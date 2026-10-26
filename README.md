@@ -11,7 +11,7 @@
   <img src="docs/images/floor-desktop.png" alt="The floorhands office. Nine agents in three pods on the left. On the right, a task waiting for approval with each agent's output, the proposed diff, and the Approve and Reject buttons" width="900">
 </p>
 
-> **Status: early (v0.3.0).** It works end to end on macOS. Version 0.3.0 adds model routing (Opus plans and reviews, Sonnet builds, Haiku does light work), spending caps that never overshoot (a step asks you before it spends more), slimmer agent sessions that share the prompt cache, a per-run access token and a stricter safety model. All 73 permission probes pass on Claude Code 2.1.310 on macOS and Linux, and they now run without an API key (see [What has been verified](#what-has-been-verified)). The agent prompts were tested on three small sample projects only. Please read [Known limits](#known-limits) before you point it at anything you care about.
+> **Status: early (v0.3.1).** It runs on macOS, Linux and Windows through WSL2 (see [Platform support](#platform-support)). Version 0.3.0 adds model routing (Opus plans and reviews, Sonnet builds, Haiku does light work), spending caps that never overshoot (a step asks you before it spends more), slimmer agent sessions that share the prompt cache, a per-run access token and a stricter safety model. All 73 permission probes pass on Claude Code 2.1.310 on macOS and Linux, and they now run without an API key (see [What has been verified](#what-has-been-verified)). The agent prompts were tested on three small sample projects only. Please read [Known limits](#known-limits) before you point it at anything you care about.
 
 ## What it is
 

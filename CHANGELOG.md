@@ -4,11 +4,20 @@ All notable changes to floorhands are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-26
+
+Platform support, stated, checked at start-up, and proven on Windows in CI. floorhands runs on macOS, Linux and Windows through WSL2.
+
 ### Added
 
 - Platform support, stated and checked. floorhands runs where Claude Code's sandbox runs: macOS, Linux and WSL2. `floorhands start` refuses on native Windows (pointing to WSL2) and on WSL1, refuses on Linux without `bubblewrap` and `socat` (with the install command), and warns about Ubuntu 24.04's user-namespace restriction (`server/platform.js`).
 - CI on Windows (`.github/workflows/platforms.yml`): native Windows must refuse with the WSL2 message, and inside WSL2 Ubuntu 24.04 the test suite and the keyless permission probes must pass.
 - README: a Platform support section with WSL2 steps.
+- `FLOORHANDS_PLATFORM_CHECK=off` skips the start-up check, for developing floorhands on a machine without the sandbox.
+
+### Changed
+
+- On Linux, `floorhands start` now refuses to start without `bubblewrap` and `socat`, with the install command. Before, it started and every agent then failed, because Claude Code's sandbox needs them.
 
 ### Fixed
 
