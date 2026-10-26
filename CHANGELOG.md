@@ -4,6 +4,16 @@ All notable changes to floorhands are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- Platform support, stated and checked. floorhands runs where Claude Code's sandbox runs: macOS, Linux and WSL2. `floorhands start` refuses on native Windows (pointing to WSL2) and on WSL1, refuses on Linux without `bubblewrap` and `socat` (with the install command), and warns about Ubuntu 24.04's user-namespace restriction (`server/platform.js`).
+- CI on Windows (`.github/workflows/platforms.yml`): native Windows must refuse with the WSL2 message, and inside WSL2 Ubuntu 24.04 the test suite and the keyless permission probes must pass.
+- README: a Platform support section with WSL2 steps.
+
+### Fixed
+
+- On git before 2.44 (Ubuntu 24.04, the default WSL distribution, ships 2.43) the project scan fell back to a plain folder walk, because git refused the `--no-lazy-fetch` option, so project facts counted git-ignored files. The scan now retries without that one option. The per-transport ban stays and blocks every hostile fixture on its own. The `GIT_NO_LAZY_FETCH` switch stays as well, though an unpatched git before 2.44 may ignore it. Found by the new WSL2 CI job.
+
 ## [0.3.0] - 2026-10-26
 
 The right model for each step, spending caps that never overshoot, a record of what every run cost, and a stricter safety model. The permission model changed (`server/tiers.js`). All 73 permission probes were run on it with Claude Code 2.1.310, on macOS and Linux, with no API key: 71 PASS and 2 known limits.

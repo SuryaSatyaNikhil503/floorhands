@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { stateDir } from './store.js';
 import { loadNotes } from './notes.js';
 import { loadPolicy, policyPath } from './models.js';
+import { checkPlatform, platformCheckOff } from './platform.js';
 import {
   findProjectRoot, readServerInfo, clearServerInfo, isEnabled, setEnabled, ensureExclude, pidAlive, serverUp,
 } from './state.js';
@@ -37,6 +38,12 @@ const MAX_LOG = 5 * 1024 * 1024;
 async function start(root, { ifEnabled }, out) {
   if (process.env.FLOORHANDS_AGENT === '1') return { code: 0 };
   if (ifEnabled && !isEnabled(root)) return { code: 0 };
+  // Refuse up front where Claude Code's sandbox cannot run, with what to do instead (every agent requires the sandbox).
+  const platform = platformCheckOff() ? { problems: [], warnings: [] } : checkPlatform();
+  if (platform.problems.length) {
+    for (const p of platform.problems) out.write(`floorhands cannot start here. ${p}\n`);
+    return { code: 1 };
+  }
   let info = await live(root);
   if (!info) {
     fs.mkdirSync(stateDir(root), { recursive: true });
@@ -72,6 +79,8 @@ async function start(root, { ifEnabled }, out) {
   }
   out.write(`floorhands → http://localhost:${info.port}  (project: ${root})\n`);
   out.write('open the page with "floorhands open" (or print the link with "floorhands url"): the page needs this run\'s access token\n');
+  // After the address: the start-up hook shows only the first line, and that must stay the address.
+  for (const w of platform.warnings) out.write(`warning: ${w}\n`);
   return { code: 0, info };
 }
 

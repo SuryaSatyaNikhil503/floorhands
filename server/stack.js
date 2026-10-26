@@ -290,6 +290,7 @@ const GIT_HARDENING = deepFreeze({
   },
 });
 const ALL_LAYERS = Object.freeze({ noLazyFetchArg: true, noLazyFetchEnv: true, protocolNever: true });
+const OLD_GIT_LAYERS = Object.freeze({ noLazyFetchArg: false, noLazyFetchEnv: true, protocolNever: true });
 
 // Builds { args, env } for `git <tail>` in root. `layers` exists so tests can switch single layers off; production uses ALL_LAYERS.
 function gitInvocation(root, tail, layers = ALL_LAYERS) {
@@ -310,10 +311,17 @@ function gitInvocation(root, tail, layers = ALL_LAYERS) {
 // Returns entries, or null when git cannot be used safely (the caller then walks the directory).
 function gitEntries(root) {
   const skipSpecs = [...SKIP_DIRS].map(d => `:(exclude,glob)**/${d}/**`);
-  const inv = gitInvocation(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...skipSpecs]);
-  const r = spawnSync('git', inv.args, { cwd: root, env: inv.env, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  // A timeout or an oversized listing still leaves the entries read so far; any other failure (including an old git that does not know
-  // --no-lazy-fetch) means "not usable".
+  const tail = ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...skipSpecs];
+  const run = layers => {
+    const inv = gitInvocation(root, tail, layers);
+    return spawnSync('git', inv.args, { cwd: root, env: inv.env, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  };
+  let r = run(ALL_LAYERS);
+  // git before 2.44 (Ubuntu 24.04 ships 2.43, the default WSL distribution) does not know the --no-lazy-fetch option and refuses to run.
+  // Retry without that one option. The per-transport ban stays, and on its own it blocks every hostile fixture (the layer-by-layer
+  // test). The GIT_NO_LAZY_FETCH switch stays too; Ubuntu's patched 2.43 honours it, but an unpatched git before 2.44 may ignore it.
+  if (!r.error && r.status !== 0 && /no-lazy-fetch/.test(String(r.stderr))) r = run(OLD_GIT_LAYERS);
+  // A timeout or an oversized listing still leaves the entries read so far; any other failure means "not usable".
   if (r.error ? !r.stdout : r.status !== 0) return null;
   const out = r.stdout || '';
   const entries = [];
@@ -673,6 +681,7 @@ const tables = [
   { name: 'EXT_LANG', entries: [...EXT_LANG.values()].map(token => tag('languages', token)) },
 ];
 export const _testing = {
+  OLD_GIT_LAYERS,
   VOCAB, tables, GIT_HARDENING, gitInvocation,
   readManifest(root, parts, hooks) {
     let realRoot = root;

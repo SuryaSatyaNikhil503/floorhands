@@ -616,6 +616,8 @@ const LAYER_SETS = {
   'noLazyFetch env only': { noLazyFetchArg: false, noLazyFetchEnv: true, protocolNever: false },
   'protocolNever only': { noLazyFetchArg: false, noLazyFetchEnv: false, protocolNever: true },
   'all layers': { noLazyFetchArg: true, noLazyFetchEnv: true, protocolNever: true },
+  // What runs on git before 2.44, which does not know --no-lazy-fetch (Ubuntu 24.04, the default WSL distribution).
+  'old git (no flag)': { noLazyFetchArg: false, noLazyFetchEnv: true, protocolNever: true },
 };
 const LS = ['ls-files', '-z', '--cached', '--others', '--exclude-standard'];
 test('protection layers one at a time: which hostile config variants does each block?', { timeout: 120000 }, () => {
@@ -993,4 +995,26 @@ test('a relative root still uses git mode and gives the same facts as the absolu
   assert.deepEqual(abs.languages, ['typescript'], 'git mode honours .gitignore');
   assert.deepEqual(detectStack(rel), abs);
   assert.equal(detectStack(rel).hasGit, true);
+});
+
+
+test('on a git that does not know --no-lazy-fetch, the scan retries without it and still honours .gitignore', () => {
+  const { OLD_GIT_LAYERS } = _testing;
+  assert.deepEqual({ ...OLD_GIT_LAYERS }, { noLazyFetchArg: false, noLazyFetchEnv: true, protocolNever: true });
+  // A stand-in git that refuses the option, like git 2.43, and otherwise runs the real git.
+  const dir = tmp();
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  fs.writeFileSync(path.join(dir, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = "--no-lazy-fetch" ] && { echo "unknown option: --no-lazy-fetch" >&2; exit 129; }; done\nexec ${realGit} "$@"\n`, { mode: 0o755 });
+  const root = tmp();
+  put(root, 'a.ts', '');
+  put(root, 'ignored.py', '');
+  put(root, '.gitignore', 'ignored.py\n');
+  git(root, 'init', '-q', '-b', 'main');
+  const saved = process.env.PATH;
+  process.env.PATH = `${dir}${path.delimiter}${saved}`;
+  try {
+    assert.deepEqual(detectStack(root).languages, ['typescript'], 'git mode, so the ignored file is not counted');
+  } finally {
+    process.env.PATH = saved;
+  }
 });
