@@ -77,11 +77,29 @@ To ask for permission, open an issue titled "Permission request": [new permissio
 
 | | |
 |---|---|
-| **OS** | macOS (tested). Linux is untested, and its Bash sandbox needs `bubblewrap` and `socat`. Windows is not supported. |
+| **OS** | macOS, Linux, or Windows through WSL2. Native Windows is not supported. See [Platform support](#platform-support). |
 | **Node** | 22 or newer. It was developed on 24. |
 | **git** | Each project must be a git repository with at least one commit if you want build and test steps. |
 | **Claude Code** | The `claude` command installed and signed in. Run `claude` once and sign in. Tested with 2.1.296. The plugin is optional. |
 | **npm** | Only needed if you want the builders and the tester to run your project's scripts. See the [FAQ](#faq). |
+
+## Platform support
+
+floorhands runs every agent inside Claude Code's sandbox and refuses to run one without it. So it runs exactly where that sandbox runs. Claude Code's docs say: "The sandbox runs on macOS, Linux, and WSL2. On native Windows, Claude Code runs commands unsandboxed."
+
+| Platform | Status | How it is checked |
+|---|---|---|
+| macOS | Supported | Developed here. CI runs the tests and all 73 permission probes on macOS. |
+| Linux | Supported. Install `bubblewrap` and `socat` (`sudo apt-get install bubblewrap socat`). | CI runs the tests and all 73 permission probes on Ubuntu. |
+| Windows through WSL2 | Supported. Run floorhands inside a WSL2 distribution, set up as Linux. | CI runs the tests and the probes inside WSL2 Ubuntu 24.04 on a Windows machine. |
+| WSL1 | Not supported. Upgrade the distribution to WSL2. | `floorhands start` refuses and says how to upgrade. |
+| Native Windows | Not supported. The sandbox does not run there. | `floorhands start` refuses and points to WSL2. CI checks this on Windows. |
+
+`floorhands start` checks this before anything starts. On Linux it also checks that `bubblewrap` and `socat` are installed, and it warns on Ubuntu 24.04 and later, whose AppArmor policy can stop bubblewrap (Claude Code's sandboxing docs describe the fix).
+
+**On Windows, step by step:** in PowerShell, run `wsl --install` (or `wsl --set-version <distribution> 2` for an existing WSL1 distribution). Inside the WSL2 distribution, install Node 22, git, `bubblewrap`, `socat` and Claude Code, and keep your projects on the Linux filesystem (your home folder there), not under `/mnt/c`, where permissions and symlinks behave differently. Then use floorhands as on Linux, and open the page from your Windows browser with the link `floorhands url` prints.
+
+**No Docker shortcut on a Mac.** In an unprivileged container, bubblewrap cannot start (Claude Code's docs), so a plain Linux container on your Mac is not a faithful test. Use CI, a Linux VM, or a WSL2 machine.
 
 ## Install in Claude Code
 
@@ -457,7 +475,7 @@ What did differ is the shape of the report. All six new reports open with a `VER
 
 Keep these limits in mind. There were two runs per cell, three projects and 24 planted problems. The same model family wrote the projects, the answer key and the reports. The scorer was fixed after the first results came in, and the report discloses the fix and the first-pass numbers. The builders, the tester, the support engineer, the SRE and the Architect were not measured. The evaluation also found one real defect. Two reviewer prompts told the agent to read `.env.example`, which the permission model denies. That is fixed in 0.2.0.
 
-**Not verified:** Linux (the sandbox there needs `bubblewrap` and `socat` and has not been tried), Windows (not supported), other Claude Code versions (re-run the probes after upgrading `claude`), and how the CLI expands `~` in the credential rules (the probes used the same rules with the absolute path of a fake home). The plugin has not been tested in an interactive Claude Code session. `floorhands:floorhands` was confirmed in the skill list of real `claude -p` sessions, both with the plugin installed and with `--plugin-dir`, and both manifests pass `claude plugin validate`. But the skill and the start-up hook have not been used interactively, and the Claude desktop app and IDE extensions were not tested. `scripts/smoke.mjs`, which runs a real review task end to end, has not been run.
+**Not verified:** real model runs on Linux and WSL2 (CI there runs the tests and the keyless probes, not a paid model), native Windows (not supported, see [Platform support](#platform-support)), other Claude Code versions (re-run the probes after upgrading `claude`), and how the CLI expands `~` in the credential rules (the probes used the same rules with the absolute path of a fake home). The plugin has not been tested in an interactive Claude Code session. `floorhands:floorhands` was confirmed in the skill list of real `claude -p` sessions, both with the plugin installed and with `--plugin-dir`, and both manifests pass `claude plugin validate`. But the skill and the start-up hook have not been used interactively, and the Claude desktop app and IDE extensions were not tested. `scripts/smoke.mjs`, which runs a real review task end to end, has not been run.
 
 ### Known limits
 
@@ -467,7 +485,7 @@ Keep these limits in mind. There were two runs per cell, three projects and 24 p
 4. **Git programs set in the repository.** A `diff.external` or textconv program from the repository's git config still runs when a reviewer runs `git diff`, `git log` or `git show`. Since 0.3.0 it runs inside the sandbox, so it cannot reach the network or write outside the working folder, but it can read most of your machine. Only run floorhands on repositories you cloned yourself.
 5. **`.gitattributes` filters.** A `.gitattributes` file in the worktree can send files through filter programs that **you** configured, such as git-lfs, when floorhands commits or when you approve. Agents cannot add a filter program. Switching off yours would break repositories that use git-lfs or git-crypt, so this is accepted. The page flags a changed `.gitattributes`.
 6. **Your own Claude settings still apply.** Agents load your `~/.claude/settings.json`. A broad allow there widens what agents may run, although deny rules still win. Since 0.3.0 your hooks do not run in agent sessions, and your skills are offered only to an agent whose roster entry hints at one for this project.
-7. **Reviews need the sandbox.** Since 0.3.0 every tier runs in the Claude Code sandbox, and a run refuses to start without it. On Linux that needs `bubblewrap` and `socat`, which have not been tried yet.
+7. **Every agent needs the sandbox.** Since 0.3.0 every tier runs in the Claude Code sandbox, so floorhands runs only on macOS, Linux and WSL2, and refuses to start elsewhere. See [Platform support](#platform-support).
 8. **`node_modules` is shared.** A worktree's `node_modules` is a link to your real one so that builds work. Agents cannot edit it, and the sandbox stops scripts from writing through it. Scripts that write caches into `node_modules/.cache` therefore fail.
 9. **Stopping does not stop running agents.** `floorhands stop` in the middle of a task does not kill a `claude` process that is already running. The 15-minute agent timeout kills only that process and not what it started. The next start marks the task failed and leaves its `floorhands/<task-id>` branch and worktree for you to remove (see [Troubleshooting](#troubleshooting)).
 10. **A failed task removes its worktree.** The diff is kept as a redacted patch in `.floorhands/patches/` (the newest 50), but the branch is deleted.
@@ -545,7 +563,7 @@ Run `claude` once in a terminal and sign in. The server runs `claude` from the `
 <details>
 <summary><strong>Build or test steps fail straight away (sandbox unavailable)</strong></summary>
 
-Build and test steps refuse to run without the Claude Code Bash sandbox. On macOS it is built in. On Linux, install `bubblewrap` and `socat` (untested). Read-only tasks still work.
+Every agent runs in the Claude Code Bash sandbox. On macOS it is built in. On Linux and WSL2, install `bubblewrap` and `socat`, and `floorhands start` tells you if they are missing. See [Platform support](#platform-support).
 </details>
 
 <details>
@@ -657,7 +675,7 @@ Running things is npm-only today. Builders can run only `npm run lint`, `build`,
 In rough order:
 
 1. Build the real benchmark corpus (20 to 50 verified fix commits, 10 held out) and publish the first results: floorhands against one agent, with confidence intervals and the cost per solved task.
-2. Watch the first Linux run of the probe workflow (the sandbox there needs `bubblewrap` and `socat`).
+2. A real model run on Linux and WSL2, not only the keyless probes.
 3. Use floorhands on real work for four weeks and report the approval rate from the recorded decisions.
 4. Kill the whole process group on stop and on timeout, and clean up the worktrees of interrupted tasks on restart.
 5. Harden the last git calls (project root, the merge on Approve) against a hostile `.git/config`.

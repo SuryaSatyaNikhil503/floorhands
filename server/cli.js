@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { stateDir } from './store.js';
 import { loadNotes } from './notes.js';
 import { loadPolicy, policyPath } from './models.js';
+import { checkPlatform } from './platform.js';
 import {
   findProjectRoot, readServerInfo, clearServerInfo, isEnabled, setEnabled, ensureExclude, pidAlive, serverUp,
 } from './state.js';
@@ -37,6 +38,13 @@ const MAX_LOG = 5 * 1024 * 1024;
 async function start(root, { ifEnabled }, out) {
   if (process.env.FLOORHANDS_AGENT === '1') return { code: 0 };
   if (ifEnabled && !isEnabled(root)) return { code: 0 };
+  // Refuse up front where Claude Code's sandbox cannot run, with what to do instead (every agent requires the sandbox).
+  const platform = checkPlatform();
+  for (const w of platform.warnings) out.write(`warning: ${w}\n`);
+  if (platform.problems.length) {
+    for (const p of platform.problems) out.write(`floorhands cannot start here. ${p}\n`);
+    return { code: 1 };
+  }
   let info = await live(root);
   if (!info) {
     fs.mkdirSync(stateDir(root), { recursive: true });

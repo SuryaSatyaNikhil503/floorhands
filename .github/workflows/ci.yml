@@ -33,6 +33,12 @@ jobs:
           git config --global user.email "ci@floorhands.invalid"
           git config --global init.defaultBranch main
 
+      # floorhands refuses to start on Linux without bubblewrap and socat (Claude Code's sandbox needs them), and the CLI and
+      # end-to-end tests start the server.
+      - name: Sandbox prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y -q bubblewrap socat
+
       # npm test uses scripts/fake-claude.mjs only: no network, no Claude login, no quota.
       # The real-CLI probes (scripts/spike-claude.mjs, scripts/smoke.mjs) are never run in CI.
       - name: Run the test suite
