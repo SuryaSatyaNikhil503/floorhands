@@ -7,7 +7,8 @@ import * as wt from './worktree.js';
 import { loadRoster } from './roster.js';
 import { runAgent } from './runner.js';
 import { loadPolicy } from './models.js';
-import { createMeter } from './meter.js';
+import { createMeter, defaultUpstream } from './meter.js';
+import { ownerClaudeEnv } from './runner.js';
 import { createOrchestrator } from './orchestrator.js';
 import { createApp, createHub } from './http.js';
 import { writeServerInfo, clearServerInfo, acquireLock, releaseLock } from './state.js';
@@ -41,7 +42,7 @@ const token = crypto.randomBytes(32).toString('base64url');
 // The spending guard every agent's model requests go through (server/meter.js). FLOORHANDS_METER=off falls back to the CLI's own cap.
 let meter = null;
 if (process.env.FLOORHANDS_METER !== 'off') {
-  try { meter = createMeter(); await meter.start(); } catch (e) { console.error(`floorhands: ${e.message}`); process.exit(1); }
+  try { meter = createMeter({ upstream: defaultUpstream(ownerClaudeEnv()) }); await meter.start(); } catch (e) { console.error(`floorhands: ${e.message}`); process.exit(1); }
 }
 const hub = createHub();
 const orchestrator = createOrchestrator({

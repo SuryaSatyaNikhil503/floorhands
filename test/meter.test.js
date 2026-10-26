@@ -124,7 +124,7 @@ test('the input estimate overestimates on purpose before any response, then foll
 
 test('usageFrom reads SSE and JSON responses', () => {
   const sse = 'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-opus-5-5","usage":{"input_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":50,"cache_creation":{"ephemeral_1h_input_tokens":20}}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":42}}\n\n';
-  assert.deepEqual(usageFrom(sse, 'x'), { usage: { input_tokens: 3, cache_read_input_tokens: 100, cache_creation_input_tokens: 50, cache_creation_1h: 20, output_tokens: 42 }, model: 'claude-opus-5-5' });
+  assert.deepEqual(usageFrom(sse, 'x'), { usage: { input_tokens: 3, cache_read_input_tokens: 100, cache_creation_input_tokens: 50, cache_creation_1h: 20, output_tokens: 42 }, model: 'claude-opus-5-5', complete: true });
   assert.deepEqual(usageFrom('{"model":"m","usage":{"input_tokens":1,"output_tokens":2}}', 'x').usage, { input_tokens: 1, output_tokens: 2 });
 });
 
@@ -202,7 +202,7 @@ test('review #2: requests waiting on one answer cannot all spend the same headro
   run.close();
 });
 
-test('review #4: a stream cut after it started is charged for what the API reported, and its reservation is released once', async () => {
+test('review #4 and N2: a stream cut before its final usage is charged its input plus the whole output allowance; released once', async () => {
   const up = await upstreamServer((req, res) => {
     req.resume();
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -215,7 +215,8 @@ test('review #4: a stream cut after it started is charged for what the API repor
   await send(run, {}).then(r => r.text()).catch(() => null);
   await new Promise(r => setTimeout(r, 50));
   assert.equal(run.reservedUsd, 0, 'released exactly once');
-  assert.ok(Math.abs(run.spentUsd - costOf(MODEL, { input_tokens: 20000, output_tokens: 1 })) < 1e-9, `charged ${run.spentUsd}`);
+  // Output already produced is billed but unknown (thinking is not even streamed): the 8000-token allowance that was sent is charged.
+  assert.ok(Math.abs(run.spentUsd - costOf(MODEL, { input_tokens: 20000, output_tokens: 8000 })) < 1e-9, `charged ${run.spentUsd}`);
   await m.close(); await up.close();
 });
 
@@ -283,5 +284,22 @@ test('the usage tracker keeps only the latest usage and handles events split acr
   const t = usageTracker('text/event-stream');
   const text = 'event: message_start\ndata: {"type":"message_start","message":{"model":"m","usage":{"input_tokens":7}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":9,"speed":"fast"}}\n\n';
   for (let i = 0; i < text.length; i += 7) t.feed(text.slice(i, i + 7));
-  assert.deepEqual(t.result('x'), { usage: { input_tokens: 7, output_tokens: 9, speed: 'fast' }, model: 'm' });
+  assert.deepEqual(t.result('x'), { usage: { input_tokens: 7, output_tokens: 9, speed: 'fast' }, model: 'm', complete: true });
+});
+
+
+test('only the endpoints the CLI needs pass the guard; other spellings and endpoints are refused', async () => {
+  const net = await import('node:net');
+  const run = meter.open({ budgetUsd: 1 });
+  const before = api.requests.length;
+  const { port } = new URL(run.url);
+  for (const [method, p] of [['POST', '/v1//messages'], ['POST', '/v1/messages/'], ['POST', '/V1/messages'], ['POST', '/v1/messages%2F'], ['POST', '/v1/messages/batches'], ['POST', '/v1/files'], ['DELETE', '/v1/models/x']]) {
+    const raw = await new Promise((resolve, reject) => {
+      const sock = net.connect(Number(port), '127.0.0.1', () => sock.end(`${method} /r/${run.id}${p} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}`));
+      let out = ''; sock.on('data', d => { out += d; }); sock.on('end', () => resolve(out)); sock.on('error', reject);
+    });
+    assert.match(raw, /^HTTP\/1\.1 (400|403)/, `${method} ${p}`);
+  }
+  assert.equal(api.requests.length, before, 'nothing unmetered reached the API');
+  run.close();
 });

@@ -378,3 +378,27 @@ test('with the guard on, the CLI cap is left off; without it, the CLI cap is use
   await runAgent(base({ spawnFn: s2, budgetUsd: 2 }));
   assert.ok(s2.calls[0].args.includes('--max-budget-usd'));
 });
+
+test('N3: the CLI\'s synthetic error messages and an owner\'s stop do not trip the bypass tripwire', async () => {
+  const meter = { url: 'http://127.0.0.1:1/r/x', started: 0, stopped: false, on: () => () => {}, report: () => ({}) };
+  const synthetic = J({ type: 'assistant', message: { model: '<synthetic>', content: [{ type: 'text', text: 'API Error: 400 stopped' }] } });
+  const r1 = await runAgent(base({ spawnFn: fakeSpawn({ lines: [synthetic, ok('x')] }), meter })).catch(e => e);
+  assert.doesNotMatch(String(r1?.message ?? ''), /spending guard/);
+  const stopped = { ...meter, stopped: true };
+  const r2 = await runAgent(base({ spawnFn: fakeSpawn({ lines: [J({ type: 'assistant', message: { model: 'claude-haiku-5-5', content: [] } }), ok('y')] }), meter: stopped })).catch(e => e);
+  assert.doesNotMatch(String(r2?.message ?? ''), /spending guard/);
+});
+
+test('N4: the environment the CLI sees includes the env of the owner\'s user settings', async () => {
+  const { ownerClaudeEnv, usesThirdPartyProvider } = await import('../server/runner.js');
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fh-cfg-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: 1, ANTHROPIC_BASE_URL: 'https://gw.example/anthropic' } }));
+    const env = ownerClaudeEnv({ CLAUDE_CONFIG_DIR: dir, PATH: '/bin' }, { platform: 'linux' });
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://gw.example/anthropic');
+    assert.equal(env.CLAUDE_CODE_USE_BEDROCK, '1');
+    assert.equal(usesThirdPartyProvider(env), true);
+    assert.equal(ownerClaudeEnv({ CLAUDE_CONFIG_DIR: path.join(dir, 'none') }).CLAUDE_CODE_USE_BEDROCK, undefined);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

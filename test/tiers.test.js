@@ -325,3 +325,18 @@ test('model, fallback, effort and budget flags are validated before they reach a
     assert.throws(() => args('read', bad), /invalid|budget/, JSON.stringify(bad));
   }
 });
+
+test('N1: absolute paths are denied to the Read and Edit tools as well as to sandboxed scripts', () => {
+  const a = args('build', { denyRead: ['/home/me/proj/.floorhands', 'relative/ignored', '/bad(path)'] });
+  const denied = valuesOf(a, '--disallowedTools');
+  for (const r of ['Read(//home/me/proj/.floorhands/**)', 'Read(//home/me/proj/.floorhands)', 'Edit(//home/me/proj/.floorhands/**)']) assert.ok(denied.includes(r), r);
+  assert.ok(!denied.some(r => r.includes('relative') || r.includes('bad(')));
+  assert.ok(JSON.parse(valuesOf(a, '--settings')[0]).sandbox.filesystem.denyRead.includes('/home/me/proj/.floorhands'));
+});
+
+test('N4: the guard address goes into the --settings env so it outranks the owner\'s settings; anything else is ignored', () => {
+  const url = `http://127.0.0.1:4000/r/${'a'.repeat(32)}`;
+  assert.deepEqual(JSON.parse(valuesOf(args('read', { baseUrl: url }), '--settings')[0]).env, { ANTHROPIC_BASE_URL: url });
+  assert.equal(JSON.parse(valuesOf(args('read', { baseUrl: 'https://evil.example' }), '--settings')[0]).env, undefined);
+  assert.equal(JSON.parse(valuesOf(args('read'), '--settings')[0]).env, undefined);
+});

@@ -466,3 +466,16 @@ test('scriptsChanged sees a rewritten test script but not other package.json edi
   fs.writeFileSync(path.join(wt.dir, 'package.json'), '{ broken');
   assert.equal(await scriptsChanged(wt), true, 'unparseable counts as changed');
 });
+
+test('review residual #8: runner settings inside package.json and git-ignored test setup files are seen', async () => {
+  const { ignoredFiles, changesTestDefinition } = await import('../server/worktree.js');
+  const { root, base } = makeRepo();
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'jest' } }));
+  sh(root, 'add', '-A'); sh(root, 'commit', '-q', '-m', 'pkg');
+  const wt = await createWorktree(root, 't-ign', { base });
+  fs.writeFileSync(path.join(wt.dir, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'jest' }, jest: { setupFiles: ['./evil.js'] } }));
+  assert.equal(await scriptsChanged(wt), true, 'a jest key in package.json changes how tests run');
+  fs.writeFileSync(path.join(wt.dir, '.gitignore'), '.npmrc\n');
+  fs.writeFileSync(path.join(wt.dir, '.npmrc'), 'node-options=--require ./evil.js\n');
+  assert.deepEqual(changesTestDefinition(await ignoredFiles(wt)), ['.npmrc']);
+});

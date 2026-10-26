@@ -115,8 +115,15 @@ export const BASH_SANDBOX_SETTINGS = deepFreeze({
   },
 });
 
+const guardEnv = url => (typeof url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/r\/[a-f0-9]{32}$/.test(url) ? { env: { ANTHROPIC_BASE_URL: url } } : {});
+const cleanAbs = list => (Array.isArray(list) ? list : []).filter(p => typeof p === 'string' && p.startsWith('/') && !p.includes('\0') && !/[()]/.test(p));
+// Claude Code reads a rule path starting with "//" as an absolute filesystem path.
+function absoluteDenies(denyRead) {
+  return cleanAbs(denyRead).flatMap(p => [`Read(/${p}/**)`, `Read(/${p})`, `Edit(/${p}/**)`, `Edit(/${p})`]);
+}
+
 function sandboxSettings(denyRead) {
-  const extra = (Array.isArray(denyRead) ? denyRead : []).filter(p => typeof p === 'string' && p.startsWith('/') && !p.includes('\0'));
+  const extra = cleanAbs(denyRead);
   if (!extra.length) return { ...AGENT_SESSION_SETTINGS, ...BASH_SANDBOX_SETTINGS };
   const sb = BASH_SANDBOX_SETTINGS.sandbox;
   return { ...AGENT_SESSION_SETTINGS, sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: [...sb.filesystem.denyRead, ...extra] } } };
@@ -149,9 +156,12 @@ const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // they end up in argv.
 // `skills: false` (the default) also turns off the owner's skills: their listing alone was about 7k tokens per run, and an agent
 // only ever uses the few skills its roster entry hints at for this project. The orchestrator passes `skills: true` only then.
-// `denyRead`: extra absolute paths the sandbox must not let scripts read (the orchestrator passes the project's .floorhands folder,
-// which an unprefixed sandbox rule cannot name).
-export function buildClaudeArgs({ agent, system, systemFile, model, effort, fallback, budgetUsd, skills = false, denyRead = [] }) {
+// `denyRead`: extra absolute paths no agent may read: the sandbox denies them to scripts, and absolute Read/Edit rules deny them to
+// the file tools. A pattern like '**/.floorhands/**' is relative to the working directory, so it does not cover the project's
+// .floorhands folder for agents working in a worktree elsewhere (review finding: a build agent read the server token by its path).
+// `baseUrl`: the spending guard's address. It also goes into the --settings env, because settings from the command line outrank the
+// owner's user settings: an ANTHROPIC_BASE_URL in ~/.claude/settings.json would otherwise send traffic around the guard.
+export function buildClaudeArgs({ agent, system, systemFile, model, effort, fallback, budgetUsd, skills = false, denyRead = [], baseUrl }) {
   if (!agent || !Object.hasOwn(TIERS, agent.tier)) throw new Error(`unknown tier "${agent?.tier}"`);
   if (systemFile !== undefined) {
     if (typeof systemFile !== 'string' || !systemFile.startsWith('/')) throw new Error('system prompt file must be an absolute path');
@@ -176,12 +186,12 @@ export function buildClaudeArgs({ agent, system, systemFile, model, effort, fall
     '--strict-mcp-config', // no --mcp-config is ever passed, so agents get no MCP servers (not the owner's Gmail, Drive, ...)
     '--tools', ...tier.tools,
     '--allowedTools', ...tier.allow,
-    '--disallowedTools', ...denyRules(),
+    '--disallowedTools', ...denyRules(), ...absoluteDenies(denyRead),
     ...(systemFile !== undefined ? ['--append-system-prompt-file', systemFile] : ['--append-system-prompt', system]),
     // The working directory, environment and git status go into the first message instead of the system prompt, so the system
     // prompt is the same in every folder and can be shared through the prompt cache.
     '--exclude-dynamic-system-prompt-sections',
-    '--settings', JSON.stringify(tier.sandbox ? sandboxSettings(denyRead) : AGENT_SESSION_SETTINGS),
+    '--settings', JSON.stringify({ ...(tier.sandbox ? sandboxSettings(denyRead) : AGENT_SESSION_SETTINGS), ...guardEnv(baseUrl) }),
   ];
   if (!skills) args.push('--disable-slash-commands');
   if (model) args.push('--model', model);

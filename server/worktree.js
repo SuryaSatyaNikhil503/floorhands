@@ -14,7 +14,7 @@ export async function git(cwd, args) {
 
 // Every git call made INSIDE a floorhands worktree (whose config and .git link the agent can influence) runs with these,
 // so no owner-configured or agent-planted program (fsmonitor, hooks, ssh) can run in the server process.
-// Not used for the merge in approve(): that runs in the owner's repo, where the owner's hooks should run.
+// approve() goes further and runs the merge with no hooks at all (see there).
 export const SAFE_GIT = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.sshCommand=/bin/false'];
 
 async function gitOk(cwd, args) {
@@ -132,6 +132,11 @@ export function riskFlags(files) {
 // Files that define HOW tests run (not what they test): package manager config and test-runner config. A builder changing one of
 // these would decide what `npm test` executes, so the tester's step is skipped. Test files themselves still run, in the sandbox.
 const TEST_DEFINITION = /(^|\/)(\.npmrc|\.yarnrc(\.yml)?|\.pnpmfile\.cjs|\.mocharc(\.[\w]+)?|(jest|vitest|vite|mocha|ava|playwright|cypress|karma|babel)\.config\.[\w.]+|\.babelrc(\.[\w]+)?)$/;
+// Ignored files never reach the commit, so changedFiles cannot see a builder that git-ignored an .npmrc and then wrote it.
+export async function ignoredFiles(wt) {
+  const out = await git(wt.dir, [...SAFE_GIT, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.']);
+  return out.split('\0').filter(f => f && !f.startsWith('node_modules'));
+}
 export const changesTestDefinition = files => (Array.isArray(files) ? files : []).filter(f => TEST_DEFINITION.test(String(f)));
 
 // Whether the "scripts" of the root package.json differ between the task's base commit and the worktree. A builder can rewrite what
@@ -139,7 +144,8 @@ export const changesTestDefinition = files => (Array.isArray(files) ? files : []
 export async function scriptsChanged(wt) {
   assertBase(wt);
   const scripts = text => {
-    try { const j = JSON.parse(text); return JSON.stringify(j?.scripts ?? null); } catch { return 'unparseable'; }
+    // Scripts plus the test-runner settings that can live inside package.json.
+    try { const j = JSON.parse(text); return JSON.stringify(['scripts', 'jest', 'mocha', 'ava', 'nyc', 'c8', 'vitest', 'babel'].map(k => j?.[k] ?? null)); } catch { return 'unparseable'; }
   };
   let before;
   try { before = scripts(await git(wt.dir, [...SAFE_GIT, 'show', `${wt.base}:package.json`])); } catch { before = 'absent'; }
